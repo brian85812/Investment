@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>護城河戰情儀表板</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css?v=3">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="glow-orb"></div>
+            <h1>戰情儀表板 <span>v2.0</span></h1>
+            <p>護城河動態槓桿系統</p>
+        </header>
+
+        <main id="dashboard" class="loading-state">
+            <div class="spinner"></div>
+            <p class="loading-text">正在分析即時大盤數據...</p>
+        </main>
+    </div>
+
+    <!-- 範本：市場卡片 -->
+    <template id="market-card-template">
+        <div class="glass-card market-card">
+            <div class="card-header">
+                <h2 class="market-name"></h2>
+                <span class="status-badge"></span>
+            </div>
+            
+            <div class="market-stats">
+                <div class="stat-box">
+                    <span class="stat-label">最新報價</span>
+                    <span class="stat-value price"></span>
+                </div>
+                <div class="stat-box target-lev-box">
+                    <span class="stat-label">目標槓桿</span>
+                    <span class="stat-value target-lev"></span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">動能階梯</span>
+                    <span class="stat-value steps"></span>
+                </div>
+            </div>
+
+            <div class="calculator-section">
+                <h3>實戰帳戶試算</h3>
+                <div class="input-group">
+                    <label>總淨值 (USD/TWD)</label>
+                    <input type="number" class="equity-input" placeholder="例如: 100000" inputmode="numeric">
+                </div>
+                <div class="input-group">
+                    <label>當前部位價值</label>
+                    <input type="number" class="position-input" placeholder="例如: 80000" inputmode="numeric">
+                </div>
+                
+                <div class="action-result hidden">
+                    <div class="current-lev">目前槓桿: <span></span></div>
+                    <div class="action-instruction"></div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script src="/static/script.js?v=5"></script>
+</body>
+</html>
