@@ -6,6 +6,7 @@ from flask_cors import CORS
 import logging
 import time
 import os
+import threading
 
 # 關閉不必要的 Flask 輸出
 log = logging.getLogger('werkzeug')
@@ -14,10 +15,21 @@ log.setLevel(logging.ERROR)
 app = Flask(__name__)
 CORS(app)
 
-def get_signal_data(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs):
+# ========================================================
+# 快取層：伺服器啟動時預先算好，之後每 30 分鐘更新一次
+# 這樣網頁請求可以瞬間回應，不用等 yfinance 下載
+# ========================================================
+_cache = {
+    'data': None,
+    'last_updated': None,
+    'is_updating': False
+}
+CACHE_TTL_MINUTES = 30
+
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=5*365)
-    
+
     df = None
     for attempt in range(3):
         try:
@@ -29,21 +41,18 @@ def get_signal_data(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma,
                 auto_adjust=True
             )
             if df is not None and len(df) > 0:
-                print(f"✅ {ticker} 抓取成功，共 {len(df)} 筆資料")
+                print(f"✅ {ticker} 抓取成功，共 {len(df)} 筆")
                 break
         except Exception as e:
-            print(f"⚠️ {ticker} 第 {attempt+1} 次嘗試失敗: {e}")
-
-        time.sleep(2)  # 等 2 秒再重試
+            print(f"⚠️ {ticker} 第 {attempt+1} 次失敗: {e}")
+        time.sleep(3)
 
     if df is None or len(df) == 0:
         print(f"❌ {ticker} 最終抓取失敗")
         return None
 
-    # 如果欄位是 MultiIndex（yf.download 有時會這樣），攤平它
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    # ===== 修改結束 =====
 
     max_idx = len(allocs) - 1
     in_trend = False
@@ -51,18 +60,18 @@ def get_signal_data(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma,
     last_action_idx = -999
     target_history = []
 
-    df['SMA_20'] = df['Close'].rolling(window=fast_ma).mean()
-    df['SMA_200'] = df['Close'].rolling(window=slow_ma).mean()
-    df['High_40'] = df['High'].shift(1).rolling(window=breakout_window).max()
-    df['Low_40'] = df['Low'].shift(1).rolling(window=breakout_window).min()
+    df['SMA_fast'] = df['Close'].rolling(window=fast_ma).mean()
+    df['SMA_slow'] = df['Close'].rolling(window=slow_ma).mean()
+    df['High_bw'] = df['High'].shift(1).rolling(window=breakout_window).max()
+    df['Low_bw']  = df['Low'].shift(1).rolling(window=breakout_window).min()
     df = df.dropna()
 
     for i in range(len(df)):
         current_close = df['Close'].iloc[i]
-        sma_fast = df['SMA_20'].iloc[i]
-        sma_slow = df['SMA_200'].iloc[i]
-        high_bw = df['High_40'].iloc[i]
-        low_bw = df['Low_40'].iloc[i]
+        sma_fast = df['SMA_fast'].iloc[i]
+        sma_slow = df['SMA_slow'].iloc[i]
+        high_bw  = df['High_bw'].iloc[i]
+        low_bw   = df['Low_bw'].iloc[i]
 
         if sma_fast < sma_slow or current_close < sma_slow:
             in_trend = False
@@ -84,11 +93,9 @@ def get_signal_data(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma,
                     last_action_idx = i
 
         alloc_pct = allocs[step_idx]
-        target_lev = base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct
-        target_history.append(target_lev)
+        target_history.append(base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct)
 
     latest = df.iloc[-1]
-
     return {
         'id': ticker.replace('.', '_').lower(),
         'name': name,
@@ -99,41 +106,86 @@ def get_signal_data(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma,
         'step_idx': step_idx,
         'max_steps': max_idx,
         'target_today': round(target_history[-1], 2),
-        'target_yesterday': round(target_history[-2], 2)
+        'target_yesterday': round(target_history[-2], 2) if len(target_history) >= 2 else round(target_history[-1], 2)
     }
 
+def refresh_cache():
+    """在背景 Thread 更新快取，不阻塞 web 請求"""
+    if _cache['is_updating']:
+        return
+    _cache['is_updating'] = True
+    print("🔄 正在更新市場資料快取...")
+
+    try:
+        qqq = compute_signal(
+            name="美股 QQQ", ticker="QQQ",
+            base_leverage=0.6, max_leverage=3.0,
+            fast_ma=20, slow_ma=200, breakout_window=40, cooldown=5,
+            allocs=[0.0, 0.5, 0.8, 1.0]
+        )
+        tw = compute_signal(
+            name="台股 006208", ticker="006208.TW",
+            base_leverage=0.8, max_leverage=3.0,
+            fast_ma=5, slow_ma=60, breakout_window=20, cooldown=3,
+            allocs=[0.0, 0.4, 0.7, 0.9, 1.0]
+        )
+
+        results = [x for x in [qqq, tw] if x is not None]
+        if results:
+            _cache['data'] = results
+            _cache['last_updated'] = datetime.now()
+            print(f"✅ 快取更新完成：{_cache['last_updated'].strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            print("❌ 快取更新失敗：所有資料均無法取得")
+    except Exception as e:
+        print(f"❌ 快取更新例外：{e}")
+    finally:
+        _cache['is_updating'] = False
+
+def background_refresh():
+    """每 30 分鐘自動重新整理一次"""
+    while True:
+        time.sleep(CACHE_TTL_MINUTES * 60)
+        refresh_cache()
+
+# ========================================================
+# Flask Routes
+# ========================================================
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/api/data')
 def get_data():
-    qqq_data = get_signal_data(
-        name="美股 QQQ", ticker="QQQ", 
-        base_leverage=0.6, max_leverage=3.0,
-        fast_ma=20, slow_ma=200, breakout_window=40, cooldown=5,
-        allocs=[0.0, 0.5, 0.8, 1.0]
-    )
-    
-    tw_data = get_signal_data(
-        name="台股 006208", ticker="006208.TW", 
-        base_leverage=0.8, max_leverage=3.0,
-        fast_ma=5, slow_ma=60, breakout_window=20, cooldown=3,
-        allocs=[0.0, 0.4, 0.7, 0.9, 1.0]
-    )
-    
-    # 防御：如果任何一個失敗，返回錯誤訊息而不是崩潰
-    results = []
-    if qqq_data:
-        results.append(qqq_data)
-    if tw_data:
-        results.append(tw_data)
-    
-    if not results:
-        return jsonify({'error': '所有市場資料擷取失敗，請稍後再試'}), 503
-    
-    return jsonify(results)
+    # 如果快取是空的（首次請求），觸發立即更新
+    if _cache['data'] is None:
+        if not _cache['is_updating']:
+            thread = threading.Thread(target=refresh_cache)
+            thread.daemon = True
+            thread.start()
+        return jsonify({'status': 'loading', 'message': '資料正在載入中，請稍候 30 秒後重新整理...'}), 202
 
+    return jsonify(_cache['data'])
+
+@app.route('/api/refresh')
+def force_refresh():
+    """手動強制更新按鈕用"""
+    thread = threading.Thread(target=refresh_cache)
+    thread.daemon = True
+    thread.start()
+    return jsonify({'status': 'ok', 'message': '正在背景更新，約 30 秒後重新整理頁面即可'})
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'ok',
+        'cache_age': str(datetime.now() - _cache['last_updated']) if _cache['last_updated'] else 'no cache yet',
+        'is_updating': _cache['is_updating']
+    })
+
+# ========================================================
+# 啟動
+# ========================================================
 import socket
 
 def get_local_ip():
@@ -147,21 +199,31 @@ def get_local_ip():
         return "127.0.0.1"
 
 import sys
-
 if hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
         pass
 
+# 啟動時預熱快取（在背景 thread 跑，不阻塞伺服器啟動）
+print("🚀 伺服器啟動，開始背景預熱資料...")
+warmup_thread = threading.Thread(target=refresh_cache)
+warmup_thread.daemon = True
+warmup_thread.start()
+
+# 定時更新 thread
+bg_thread = threading.Thread(target=background_refresh)
+bg_thread.daemon = True
+bg_thread.start()
+
 if __name__ == '__main__':
-    local_ip = get_local_ip()
     port = int(os.environ.get('PORT', 5000))
-    print("\n" + "="*55, flush=True)
-    print(" 🚀 護城河 Web 伺服器啟動成功！ 🚀", flush=True)
-    print("="*55, flush=True)
-    print(f" 💻 電腦本機請用此網址: http://127.0.0.1:{port}", flush=True)
-    print(f" 📱 手機連線請用此網址: http://{local_ip}:{port}", flush=True)
-    print(" (確保手機與電腦連線至同一個 Wi-Fi)", flush=True)
-    print("="*55 + "\n", flush=True)
+    local_ip = get_local_ip()
+    print("\n" + "="*55)
+    print(" 🚀 護城河 Web 伺服器啟動成功！ 🚀")
+    print("="*55)
+    print(f" 💻 電腦本機請用此網址: http://127.0.0.1:{port}")
+    print(f" 📱 手機連線請用此網址: http://{local_ip}:{port}")
+    print(" (確保手機與電腦連線至同一個 Wi-Fi)")
+    print("="*55 + "\n")
     app.run(host='0.0.0.0', port=port, debug=False)
