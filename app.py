@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 import logging
+import time
+import os
 
 # 關閉不必要的 Flask 輸出
 log = logging.getLogger('werkzeug')
@@ -120,7 +122,17 @@ def get_data():
         allocs=[0.0, 0.4, 0.7, 0.9, 1.0]
     )
     
-    return jsonify([qqq_data, tw_data])
+    # 防御：如果任何一個失敗，返回錯誤訊息而不是崩潰
+    results = []
+    if qqq_data:
+        results.append(qqq_data)
+    if tw_data:
+        results.append(tw_data)
+    
+    if not results:
+        return jsonify({'error': '所有市場資料擷取失敗，請稍後再試'}), 503
+    
+    return jsonify(results)
 
 import socket
 
@@ -144,11 +156,12 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 if __name__ == '__main__':
     local_ip = get_local_ip()
+    port = int(os.environ.get('PORT', 5000))
     print("\n" + "="*55, flush=True)
     print(" 🚀 護城河 Web 伺服器啟動成功！ 🚀", flush=True)
     print("="*55, flush=True)
-    print(f" 💻 電腦本機請用此網址: http://127.0.0.1:5000", flush=True)
-    print(f" 📱 手機連線請用此網址: http://{local_ip}:5000", flush=True)
+    print(f" 💻 電腦本機請用此網址: http://127.0.0.1:{port}", flush=True)
+    print(f" 📱 手機連線請用此網址: http://{local_ip}:{port}", flush=True)
     print(" (確保手機與電腦連線至同一個 Wi-Fi)", flush=True)
     print("="*55 + "\n", flush=True)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False)
