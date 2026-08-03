@@ -16,39 +16,61 @@ def get_signal_data(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma,
     end_date = datetime.now()
     start_date = end_date - timedelta(days=5*365)
     
-    df = yf.Ticker(ticker).history(start=start_date)
-    if len(df) == 0:
+    df = None
+    for attempt in range(3):
+        try:
+            df = yf.download(
+                ticker,
+                start=start_date.strftime('%Y-%m-%d'),
+                end=end_date.strftime('%Y-%m-%d'),
+                progress=False,
+                auto_adjust=True
+            )
+            if df is not None and len(df) > 0:
+                print(f"✅ {ticker} 抓取成功，共 {len(df)} 筆資料")
+                break
+        except Exception as e:
+            print(f"⚠️ {ticker} 第 {attempt+1} 次嘗試失敗: {e}")
+
+        time.sleep(2)  # 等 2 秒再重試
+
+    if df is None or len(df) == 0:
+        print(f"❌ {ticker} 最終抓取失敗")
         return None
-        
+
+    # 如果欄位是 MultiIndex（yf.download 有時會這樣），攤平它
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    # ===== 修改結束 =====
+
     max_idx = len(allocs) - 1
     in_trend = False
     step_idx = 0
     last_action_idx = -999
     target_history = []
-    
+
     df['SMA_20'] = df['Close'].rolling(window=fast_ma).mean()
     df['SMA_200'] = df['Close'].rolling(window=slow_ma).mean()
     df['High_40'] = df['High'].shift(1).rolling(window=breakout_window).max()
     df['Low_40'] = df['Low'].shift(1).rolling(window=breakout_window).min()
-    
     df = df.dropna()
-    
+
     for i in range(len(df)):
         current_close = df['Close'].iloc[i]
         sma_fast = df['SMA_20'].iloc[i]
         sma_slow = df['SMA_200'].iloc[i]
         high_bw = df['High_40'].iloc[i]
         low_bw = df['Low_40'].iloc[i]
-        
+
         if sma_fast < sma_slow or current_close < sma_slow:
             in_trend = False
             step_idx = 0
             target_history.append(base_leverage)
             continue
-            
+
         if sma_fast >= sma_slow and not in_trend:
             in_trend = True
-            
+
         if in_trend and (i - last_action_idx >= cooldown):
             if current_close > high_bw:
                 if step_idx < max_idx:
@@ -58,18 +80,19 @@ def get_signal_data(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma,
                 if step_idx > 0:
                     step_idx -= 1
                     last_action_idx = i
-                    
+
         alloc_pct = allocs[step_idx]
         target_lev = base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct
         target_history.append(target_lev)
-                    
+
     latest = df.iloc[-1]
+
     return {
         'id': ticker.replace('.', '_').lower(),
         'name': name,
         'ticker': ticker,
         'date': latest.name.strftime('%Y-%m-%d'),
-        'close': round(latest['Close'], 2),
+        'close': round(float(latest['Close']), 2),
         'in_trend': in_trend,
         'step_idx': step_idx,
         'max_steps': max_idx,
