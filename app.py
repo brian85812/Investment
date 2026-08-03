@@ -155,14 +155,27 @@ def background_refresh():
 def index():
     return render_template('index.html')
 
+_bg_thread_started = False
+
 @app.route('/api/data')
 def get_data():
+    global _bg_thread_started
+    
     # 如果快取是空的（首次請求），觸發立即更新
     if _cache['data'] is None:
         if not _cache['is_updating']:
+            # 啟動抓資料 Thread
             thread = threading.Thread(target=refresh_cache)
             thread.daemon = True
             thread.start()
+            
+            # 確保 30 分鐘定時更新的 Thread 也有在跑
+            if not _bg_thread_started:
+                bg_thread = threading.Thread(target=background_refresh)
+                bg_thread.daemon = True
+                bg_thread.start()
+                _bg_thread_started = True
+                
         return jsonify({'status': 'loading', 'message': '資料正在載入中，請稍候 30 秒後重新整理...'}), 202
 
     return jsonify(_cache['data'])
@@ -204,17 +217,6 @@ if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
         pass
-
-# 啟動時預熱快取（在背景 thread 跑，不阻塞伺服器啟動）
-print("🚀 伺服器啟動，開始背景預熱資料...")
-warmup_thread = threading.Thread(target=refresh_cache)
-warmup_thread.daemon = True
-warmup_thread.start()
-
-# 定時更新 thread
-bg_thread = threading.Thread(target=background_refresh)
-bg_thread.daemon = True
-bg_thread.start()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
