@@ -48,6 +48,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     clone.querySelector('.target-lev').textContent = market.target_today.toFixed(2) + 'x';
                     clone.querySelector('.steps').textContent = `${market.step_idx} / ${market.max_steps}`;
 
+                    clone.querySelector('.fast-ma').innerHTML = `${market.fast_ma_len}MA: <span>${market.sma_fast_val.toFixed(2)}</span>`;
+                    clone.querySelector('.slow-ma').innerHTML = `${market.slow_ma_len}MA: <span>${market.sma_slow_val.toFixed(2)}</span>`;
+                    clone.querySelector('.strategy-explanation').textContent = market.explanation;
+
                     const equityInput = clone.querySelector('.equity-input');
                     const positionInput = clone.querySelector('.position-input');
                     const resultBox = clone.querySelector('.action-result');

@@ -27,16 +27,12 @@ _cache = {
 CACHE_TTL_MINUTES = 30
 
 def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=5*365)
-
     df = None
     for attempt in range(3):
         try:
             df = yf.download(
                 ticker,
-                start=start_date.strftime('%Y-%m-%d'),
-                end=end_date.strftime('%Y-%m-%d'),
+                period='5y',
                 progress=False,
                 auto_adjust=True
             )
@@ -53,6 +49,21 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
+    # 針對 Yahoo Finance Bug：最後一天如果有開盤/有量，但收盤價是 NaN，手動用即時報價補上
+    if len(df) > 0 and pd.isna(df['Close'].iloc[-1]):
+        try:
+            last_price = yf.Ticker(ticker).fast_info.last_price
+            df.iloc[-1, df.columns.get_loc('Close')] = last_price
+            if pd.isna(df['High'].iloc[-1]):
+                df.iloc[-1, df.columns.get_loc('High')] = last_price
+            if pd.isna(df['Low'].iloc[-1]):
+                df.iloc[-1, df.columns.get_loc('Low')] = last_price
+            if pd.isna(df['Open'].iloc[-1]):
+                df.iloc[-1, df.columns.get_loc('Open')] = last_price
+            print(f"🔧 已使用即時報價 {last_price} 修補 {ticker} 的缺失資料")
+        except Exception as e:
+            print(f"⚠️ 嘗試修補最新價格失敗: {e}")
 
     max_idx = len(allocs) - 1
     in_trend = False
@@ -95,6 +106,18 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         alloc_pct = allocs[step_idx]
         target_history.append(base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct)
 
+    if current_close < sma_slow:
+        explanation = f"目前價格低於長線 ({slow_ma}MA)，處於空頭防禦狀態，維持最低底倉 ({base_leverage}x)。"
+    elif sma_fast < sma_slow:
+        explanation = f"目前價格在長線之上，但短線 ({fast_ma}MA) 尚未黃金交叉，維持最低底倉 ({base_leverage}x)。"
+    else:
+        if step_idx == 0:
+            explanation = f"多頭趨勢 (雙均線之上)，但尚未突破近 {breakout_window} 日高點，維持底倉 ({base_leverage}x) 等待發動。"
+        else:
+            alloc_pct = allocs[step_idx]
+            target_lev = base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct
+            explanation = f"多頭趨勢確立，已觸發 {step_idx} 次突破向上。動能階梯 {step_idx}/{max_idx}，配置槓桿 {target_lev:.2f}x。"
+
     latest = df.iloc[-1]
     return {
         'id': ticker.replace('.', '_').lower(),
@@ -106,7 +129,12 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'step_idx': step_idx,
         'max_steps': max_idx,
         'target_today': round(target_history[-1], 2),
-        'target_yesterday': round(target_history[-2], 2) if len(target_history) >= 2 else round(target_history[-1], 2)
+        'target_yesterday': round(target_history[-2], 2) if len(target_history) >= 2 else round(target_history[-1], 2),
+        'sma_fast_val': round(float(latest['SMA_fast']), 2),
+        'sma_slow_val': round(float(latest['SMA_slow']), 2),
+        'fast_ma_len': fast_ma,
+        'slow_ma_len': slow_ma,
+        'explanation': explanation
     }
 
 def refresh_cache():
@@ -221,6 +249,19 @@ if hasattr(sys.stdout, 'reconfigure'):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     local_ip = get_local_ip()
+    
+    # 啟動時預熱快取（只在本地直接執行 python app.py 時觸發，避免 Render gunicorn fork 問題）
+    print("🚀 伺服器啟動，開始背景預熱資料...")
+    warmup_thread = threading.Thread(target=refresh_cache)
+    warmup_thread.daemon = True
+    warmup_thread.start()
+    
+    # 定時更新 thread
+    bg_thread = threading.Thread(target=background_refresh)
+    bg_thread.daemon = True
+    bg_thread.start()
+    _bg_thread_started = True
+
     print("\n" + "="*55)
     print(" 🚀 護城河 Web 伺服器啟動成功！ 🚀")
     print("="*55)
