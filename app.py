@@ -196,14 +196,14 @@ def refresh_cache():
     try:
         qqq = compute_signal(
             name="美股 QQQ", ticker="QQQ",
-            base_leverage=0.6, max_leverage=3.0,
-            fast_ma=20, slow_ma=200, breakout_window=40, cooldown=5,
+            base_leverage=0.8, max_leverage=3.0,
+            fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
             allocs=[0.0, 0.5, 0.8, 1.0]
         )
         tw = compute_signal(
             name="台股 006208", ticker="006208.TW",
-            base_leverage=0.8, max_leverage=3.0,
-            fast_ma=5, slow_ma=60, breakout_window=20, cooldown=3,
+            base_leverage=0.6, max_leverage=3.0,
+            fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
             allocs=[0.0, 0.4, 0.7, 0.9, 1.0]
         )
 
