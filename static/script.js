@@ -89,52 +89,35 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
 
                     function calculateAction(equity, position) {
-                        const currentLev = position / equity;
                         const targetToday = market.target_today;
                         const targetPos = equity * targetToday;
-                        const diff = targetPos - position;
 
                         resultBox.classList.remove('hidden');
                         instructionDiv.className = 'action-instruction';
 
-                        // 摘要行
-                        summaryDiv.innerHTML = `
-                            <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-                                <span>目前槓桿: <strong>${currentLev.toFixed(2)}x</strong></span>
-                                <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
-                                <span>目標部位: <strong>$${fmt(targetPos)}</strong></span>
-                            </div>`;
+                        const marginAcct = Math.round(equity * 2/3);
+                        const idleCash = Math.round(equity * 1/3);
 
                         if (lastEdited === 'equity') {
-                            // 使用者輸入淨值，告訴他目標部位應該是多少
+                            summaryDiv.innerHTML = `
+                                <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                                    <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
+                                    <span>目標部位: <strong>$${fmt(targetPos)}</strong></span>
+                                </div>`;
                             instructionDiv.innerHTML = `
-                                💡 <strong>依當前目標槓桿 ${targetToday}x</strong><br>
-                                您的淨值 $${fmt(equity)} 對應的目標總部位為 <strong>$${fmt(targetPos)}</strong>。<br>
-                                保證金帳戶建議放 <strong>$${fmt(equity * 2/3)}</strong>（2/3 法則），其餘 $${fmt(equity * 1/3)} 可放生息帳戶。`;
+                                💡 淨值 <strong>$${fmt(equity)}</strong> 在 ${targetToday}x 槓桿下，應持有 <strong>$${fmt(targetPos)}</strong> 的部位。<br>
+                                🛡️ 保證金帳戶放 <strong>$${fmt(marginAcct)}</strong>，其餘 <strong>$${fmt(idleCash)}</strong> 放生息帳戶。`;
                             instructionDiv.classList.add('hold');
                         } else {
-                            // 使用者輸入部位，反推需要多少淨值
-                            if (currentLev > targetToday * 1.02) {
-                                // 實際槓桿超標 → 必須減碼
-                                const sellAmt = position - targetPos;
-                                instructionDiv.innerHTML = `
-                                    ⚠️ <strong>實際槓桿 ${currentLev.toFixed(2)}x 超過目標 ${targetToday}x！</strong><br>
-                                    須賣出 <strong>$${fmt(sellAmt)}</strong> 的部位，將曝險壓回 $${fmt(targetPos)}。<br>
-                                    或者追加淨值 <strong>$${fmt(position/targetToday - equity)}</strong> 也可拉低槓桿。`;
-                                instructionDiv.classList.add('sell');
-                            } else if (currentLev < targetToday * 0.98) {
-                                // 實際槓桿低於目標 → 自然降槓桿紅利，不需動作
-                                instructionDiv.innerHTML = `
-                                    🧘 <strong>自然降槓桿紅利期</strong><br>
-                                    實際槓桿 ${currentLev.toFixed(2)}x 低於目標 ${targetToday}x，這是上漲帶來的自然衰退。<br>
-                                    <strong>完全不需要追加部位！</strong>讓利潤繼續奔跑。`;
-                                instructionDiv.classList.add('hold');
-                            } else {
-                                instructionDiv.innerHTML = `
-                                    ✅ <strong>槓桿正常</strong><br>
-                                    實際槓桿 ${currentLev.toFixed(2)}x ≈ 目標 ${targetToday}x，無需任何操作。`;
-                                instructionDiv.classList.add('hold');
-                            }
+                            summaryDiv.innerHTML = `
+                                <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                                    <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
+                                    <span>所需淨值: <strong>$${fmt(equity)}</strong></span>
+                                </div>`;
+                            instructionDiv.innerHTML = `
+                                💡 持有 <strong>$${fmt(position)}</strong> 部位在 ${targetToday}x 槓桿下，需要淨值 <strong>$${fmt(equity)}</strong>。<br>
+                                🛡️ 保證金帳戶放 <strong>$${fmt(marginAcct)}</strong>，其餘 <strong>$${fmt(idleCash)}</strong> 放生息帳戶。`;
+                            instructionDiv.classList.add('hold');
                         }
                     }
 
