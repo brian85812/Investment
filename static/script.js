@@ -55,61 +55,88 @@ document.addEventListener('DOMContentLoaded', () => {
                     const equityInput = clone.querySelector('.equity-input');
                     const positionInput = clone.querySelector('.position-input');
                     const resultBox = clone.querySelector('.action-result');
-                    const currentLevSpan = clone.querySelector('.current-lev span');
+                    const summaryDiv = clone.querySelector('.calc-summary');
                     const instructionDiv = clone.querySelector('.action-instruction');
 
-                    const calculateAction = () => {
-                        const equity = parseFloat(equityInput.value);
-                        const position = parseFloat(positionInput.value);
+                    let lastEdited = null; // 'equity' or 'position'
 
-                        if (isNaN(equity) || isNaN(position) || equity <= 0) {
+                    const fmt = (n) => n.toLocaleString(undefined, {maximumFractionDigits:0});
+
+                    // 輸入淨值 → 自動反推「目標部位應為多少」
+                    equityInput.addEventListener('input', () => {
+                        lastEdited = 'equity';
+                        const equity = parseFloat(equityInput.value);
+                        if (isNaN(equity) || equity <= 0) {
                             resultBox.classList.add('hidden');
                             return;
                         }
+                        const targetPos = equity * market.target_today;
+                        positionInput.value = Math.round(targetPos);
+                        calculateAction(equity, targetPos);
+                    });
 
+                    // 輸入部位 → 自動反推「需要多少淨值」
+                    positionInput.addEventListener('input', () => {
+                        lastEdited = 'position';
+                        const position = parseFloat(positionInput.value);
+                        if (isNaN(position) || position <= 0) {
+                            resultBox.classList.add('hidden');
+                            return;
+                        }
+                        const neededEquity = position / market.target_today;
+                        equityInput.value = Math.round(neededEquity);
+                        calculateAction(neededEquity, position);
+                    });
+
+                    function calculateAction(equity, position) {
                         const currentLev = position / equity;
-                        currentLevSpan.textContent = currentLev.toFixed(2) + 'x';
-                        resultBox.classList.remove('hidden');
-
                         const targetToday = market.target_today;
-                        const targetYtd = market.target_yesterday;
+                        const targetPos = equity * targetToday;
+                        const diff = targetPos - position;
 
+                        resultBox.classList.remove('hidden');
                         instructionDiv.className = 'action-instruction';
 
-                        if (targetToday > targetYtd) {
-                            const targetPos = equity * targetToday;
-                            const buyAmt = targetPos - position;
-                            instructionDiv.innerHTML = `📈 <strong>系統升級</strong><br>買進價值 $${buyAmt.toLocaleString(undefined, {maximumFractionDigits:0})} 的部位，將槓桿提升至 ${targetToday} 倍。`;
-                            instructionDiv.classList.add('buy');
-                        } else if (targetToday < targetYtd) {
-                            if (currentLev > targetToday) {
-                                const targetPos = equity * targetToday;
-                                const sellAmt = position - targetPos;
-                                instructionDiv.innerHTML = `📉 <strong>系統降級</strong><br>槓桿高於目標，請賣出 $${sellAmt.toLocaleString(undefined, {maximumFractionDigits:0})} 的部位。`;
-                                instructionDiv.classList.add('sell');
-                            } else {
-                                instructionDiv.innerHTML = `🛡️ <strong>系統降級</strong><br>您的槓桿已在安全帶 (${targetToday} 倍以下)，無需動作！`;
-                                instructionDiv.classList.add('hold');
-                            }
+                        // 摘要行
+                        summaryDiv.innerHTML = `
+                            <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                                <span>目前槓桿: <strong>${currentLev.toFixed(2)}x</strong></span>
+                                <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
+                                <span>目標部位: <strong>$${fmt(targetPos)}</strong></span>
+                            </div>`;
+
+                        if (lastEdited === 'equity') {
+                            // 使用者輸入淨值，告訴他目標部位應該是多少
+                            instructionDiv.innerHTML = `
+                                💡 <strong>依當前目標槓桿 ${targetToday}x</strong><br>
+                                您的淨值 $${fmt(equity)} 對應的目標總部位為 <strong>$${fmt(targetPos)}</strong>。<br>
+                                保證金帳戶建議放 <strong>$${fmt(equity * 2/3)}</strong>（2/3 法則），其餘 $${fmt(equity * 1/3)} 可放生息帳戶。`;
+                            instructionDiv.classList.add('hold');
                         } else {
-                            if (currentLev > targetToday) {
-                                const targetPos = equity * targetToday;
+                            // 使用者輸入部位，反推需要多少淨值
+                            if (currentLev > targetToday * 1.02) {
+                                // 實際槓桿超標 → 必須減碼
                                 const sellAmt = position - targetPos;
-                                instructionDiv.innerHTML = `⚠️ <strong>風險過高</strong><br>超過目標上限，請賣出 $${sellAmt.toLocaleString(undefined, {maximumFractionDigits:0})} 的部位。`;
+                                instructionDiv.innerHTML = `
+                                    ⚠️ <strong>實際槓桿 ${currentLev.toFixed(2)}x 超過目標 ${targetToday}x！</strong><br>
+                                    須賣出 <strong>$${fmt(sellAmt)}</strong> 的部位，將曝險壓回 $${fmt(targetPos)}。<br>
+                                    或者追加淨值 <strong>$${fmt(position/targetToday - equity)}</strong> 也可拉低槓桿。`;
                                 instructionDiv.classList.add('sell');
+                            } else if (currentLev < targetToday * 0.98) {
+                                // 實際槓桿低於目標 → 自然降槓桿紅利，不需動作
+                                instructionDiv.innerHTML = `
+                                    🧘 <strong>自然降槓桿紅利期</strong><br>
+                                    實際槓桿 ${currentLev.toFixed(2)}x 低於目標 ${targetToday}x，這是上漲帶來的自然衰退。<br>
+                                    <strong>完全不需要追加部位！</strong>讓利潤繼續奔跑。`;
+                                instructionDiv.classList.add('hold');
                             } else {
-                                if (market.step_idx === 0) {
-                                    instructionDiv.innerHTML = `🛡️ <strong>全面防禦狀態</strong><br>目前處於低動能環境，請維持 ${targetToday} 倍防禦底倉，耐心等待！`;
-                                } else {
-                                    instructionDiv.innerHTML = `🧘 <strong>自然降槓桿紅利期</strong><br>狀態非常安全，完全無需動作，讓利潤奔跑！`;
-                                }
+                                instructionDiv.innerHTML = `
+                                    ✅ <strong>槓桿正常</strong><br>
+                                    實際槓桿 ${currentLev.toFixed(2)}x ≈ 目標 ${targetToday}x，無需任何操作。`;
                                 instructionDiv.classList.add('hold');
                             }
                         }
-                    };
-
-                    equityInput.addEventListener('input', calculateAction);
-                    positionInput.addEventListener('input', calculateAction);
+                    }
 
                     dashboard.appendChild(clone);
                 });

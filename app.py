@@ -134,6 +134,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         alloc_pct = allocs[step_idx]
         target_history.append(base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct)
 
+    # === 計算前一天的目標槓桿 ===
     latest = df.iloc[-1]
     cur_p = round(float(latest['Close']), 2)
     f_ma = round(float(latest['SMA_fast']), 2)
@@ -141,33 +142,73 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     h_bw = round(float(latest['High_bw']), 2)
     l_bw = round(float(latest['Low_bw']), 2)
 
+    prev_target = round(target_history[-2], 2) if len(target_history) >= 2 else round(target_history[-1], 2)
+    curr_target = round(target_history[-1], 2)
+    lev_changed = curr_target != prev_target
+
+    # === 判斷狀態並生成詳細說明 ===
     if cur_p < s_ma:
-        explanation = (
-            f"🛡️【防禦狀態】收盤價 ({cur_p}) 跌破長線 {slow_ma}MA ({s_ma})，"
-            f"觸發防線停損機制，動能階梯強制歸零，維持最低底倉 {base_leverage}x 防守避險。"
-        )
+        # 收盤價跌破年線
+        if lev_changed and curr_target < prev_target:
+            explanation = (
+                f"🚨【防禦降槓 {prev_target}x → {curr_target}x】"
+                f"收盤價 ({cur_p}) 跌破年線 {slow_ma}MA ({s_ma})，"
+                f"觸發護城河最高防線！動能階梯強制歸零，"
+                f"從 {prev_target}x 急降至底倉 {curr_target}x。"
+                f"嚴禁手動加碼，等待系統重啟訊號。"
+            )
+        else:
+            explanation = (
+                f"🛡️【防禦狀態 · 維持 {curr_target}x】"
+                f"收盤價 ({cur_p}) 持續低於年線 {slow_ma}MA ({s_ma})，"
+                f"維持最低底倉 {curr_target}x 防守避險。"
+                f"距離年線還有 {round(s_ma - cur_p, 2)} 點，耐心等待均線修復。"
+            )
     elif f_ma < s_ma:
+        # 快線尚未站上慢線
         explanation = (
-            f"👀【觀察狀態】收盤價 ({cur_p}) 雖在 {slow_ma}MA ({s_ma}) 之上，"
-            f"但短線 {fast_ma}MA ({f_ma}) 尚未黃金交叉，多頭架構未完整確立，維持最低底倉 {base_leverage}x 待命。"
+            f"👀【觀察狀態 · 維持 {curr_target}x】"
+            f"收盤價 ({cur_p}) 雖在年線 {slow_ma}MA ({s_ma}) 之上，"
+            f"但短線 {fast_ma}MA ({f_ma}) 尚未黃金交叉，多頭架構未完整確立。"
+            f"快線距慢線 {round(s_ma - f_ma, 2)} 點，維持底倉 {curr_target}x 待命。"
         )
     else:
+        # 多頭環境
         if step_idx == 0:
             diff_h = round(h_bw - cur_p, 2)
             explanation = (
-                f"🚀【多頭待命中】雙均線多頭確立 ({fast_ma}MA {f_ma} > {slow_ma}MA {s_ma})，"
-                f"距第一階加碼門檻（近 {breakout_window} 日最高點 {h_bw}）僅差 {max(diff_h, 0.01)} 點。"
-                f"突破前高前維持底倉 {base_leverage}x，避免在震盪區提早追高！"
+                f"🚀【多頭待命 · 維持 {curr_target}x】"
+                f"雙均線多頭確立 ({fast_ma}MA {f_ma} > {slow_ma}MA {s_ma})，"
+                f"距第一階加碼門檻（突破近 {breakout_window} 日最高點 {h_bw}）差 {max(diff_h, 0.01)} 點。"
+                f"突破前高前維持底倉，避免在震盪區追高！"
+            )
+        elif lev_changed and curr_target > prev_target:
+            # 加碼升階
+            explanation = (
+                f"📈【突破加碼 {prev_target}x → {curr_target}x】"
+                f"收盤價 ({cur_p}) 突破近 {breakout_window} 日最高點 ({h_bw})！"
+                f"動能階梯升至 {step_idx}/{max_idx}，槓桿從 {prev_target}x 提升至 {curr_target}x。"
+                f"下一階加碼需再次突破新高，減碼防線在 {l_bw} 以下。"
+            )
+        elif lev_changed and curr_target < prev_target:
+            # 減碼降階
+            explanation = (
+                f"📉【跌破減碼 {prev_target}x → {curr_target}x】"
+                f"收盤價 ({cur_p}) 跌破近 {breakout_window} 日最低點 ({l_bw})！"
+                f"動能階梯降至 {step_idx}/{max_idx}，槓桿從 {prev_target}x 壓回 {curr_target}x。"
+                f"若實際槓桿超過 {curr_target}x，須強制賣出部位壓回目標。"
             )
         else:
-            alloc_pct = allocs[step_idx]
-            target_lev = base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct
+            # 維持中（多頭進攻，無變化）
             explanation = (
-                f"⚡【多頭進攻中】雙均線多頭且已確認 {step_idx} 次突破！"
-                f"目前動能階梯為 {step_idx}/{max_idx}，配置槓桿 {target_lev:.2f}x。"
-                f"（加碼門檻: >{h_bw}，減碼門檻: <{l_bw}）"
+                f"⚡【多頭進攻 · 維持 {curr_target}x】"
+                f"雙均線多頭且已確認 {step_idx} 次突破，"
+                f"動能階梯 {step_idx}/{max_idx}，槓桿維持 {curr_target}x。"
+                f"加碼門檻: >{h_bw}，減碼門檻: <{l_bw}。"
+                f"目標槓桿未變，無需動作，讓利潤奔跑！"
             )
 
+    # === 組合回傳資料 ===
     return {
         'id': ticker.replace('.', '_').lower(),
         'name': name,
@@ -177,12 +218,16 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'in_trend': in_trend,
         'step_idx': step_idx,
         'max_steps': max_idx,
-        'target_today': round(target_history[-1], 2),
-        'target_yesterday': round(target_history[-2], 2) if len(target_history) >= 2 else round(target_history[-1], 2),
+        'target_today': curr_target,
+        'target_yesterday': prev_target,
         'sma_fast_val': f_ma,
         'sma_slow_val': s_ma,
         'fast_ma_len': fast_ma,
         'slow_ma_len': slow_ma,
+        'high_bw': h_bw,
+        'low_bw': l_bw,
+        'base_leverage': base_leverage,
+        'max_leverage': max_leverage,
         'explanation': explanation
     }
 

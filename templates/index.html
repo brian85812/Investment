@@ -53,18 +53,19 @@
             </div>
 
             <div class="calculator-section">
-                <h3>實戰帳戶試算</h3>
+                <h3>📐 實戰帳戶試算</h3>
+                <p class="calc-hint">輸入任一欄位，自動反推另一欄位（依當前目標槓桿）</p>
                 <div class="input-group">
-                    <label>總淨值 (USD/TWD)</label>
-                    <input type="number" class="equity-input" placeholder="例如: 100000" inputmode="numeric">
+                    <label>總淨值 (資金)</label>
+                    <input type="number" class="equity-input" placeholder="例如: 5000000" inputmode="numeric">
                 </div>
                 <div class="input-group">
-                    <label>當前部位價值</label>
-                    <input type="number" class="position-input" placeholder="例如: 80000" inputmode="numeric">
+                    <label>目前部位價值 (曝險)</label>
+                    <input type="number" class="position-input" placeholder="例如: 13800000" inputmode="numeric">
                 </div>
                 
                 <div class="action-result hidden">
-                    <div class="current-lev">目前槓桿: <span></span></div>
+                    <div class="calc-summary"></div>
                     <div class="action-instruction"></div>
                 </div>
             </div>
