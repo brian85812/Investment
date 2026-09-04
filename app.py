@@ -7,6 +7,9 @@ import logging
 import time
 import os
 import threading
+import urllib.request
+import json
+import ssl
 
 # 關閉不必要的 Flask 輸出
 log = logging.getLogger('werkzeug')
@@ -52,47 +55,151 @@ def apply_data_patches(ticker, df):
         df = df.sort_index()
     return df
 
-def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs):
-    df = None
-    for attempt in range(3):
+# ========================================================
+# 多層強健資料抓取層 (Multi-tier Robust Data Pipeline)
+# 第 1 層: yfinance 套件標準抓取
+# 第 2 層: Yahoo Direct Chart API (原生 HTTP 請求，繞過套件 Session/Cookie 阻擋)
+# 第 3 層: 台灣證券交易所 (TWSE) 官方 API 自動對帳補齊
+# ========================================================
+
+ssl_ctx = ssl.create_default_context()
+ssl_ctx.check_hostname = False
+ssl_ctx.verify_mode = ssl.CERT_NONE
+
+def fetch_yahoo_direct(ticker):
+    """第 2 層防禦：直接發送 HTTP 請求向 Yahoo Chart API 抓取 5 年 K 棒"""
+    try:
+        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5y'
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+        })
+        resp = urllib.request.urlopen(req, context=ssl_ctx, timeout=12)
+        data = json.loads(resp.read().decode('utf-8'))
+        result = data['chart']['result'][0]
+        timestamps = result['timestamp']
+        quote = result['indicators']['quote'][0]
+        adj_close = result['indicators'].get('adjclose', [{}])[0].get('adjclose', quote['close'])
+        
+        df = pd.DataFrame({
+            'Open': quote['open'],
+            'High': quote['high'],
+            'Low': quote['low'],
+            'Close': quote['close'],
+            'Adj Close': adj_close,
+            'Volume': quote['volume']
+        }, index=pd.to_datetime(timestamps, unit='s'))
+        df = df.dropna(subset=['Close'])
+        if len(df) > 100:
+            print(f"⚡ [Layer 2] Yahoo Direct API 備援成功抓取 {ticker}，共 {len(df)} 筆")
+            return df
+    except Exception as e:
+        print(f"⚠️ [Layer 2] Yahoo Direct API 抓取失敗 ({ticker}): {e}")
+    return None
+
+def auto_patch_twse(ticker, df):
+    """第 3 層防禦（台股專屬）：向台灣證券交易所 (TWSE) 官方即時比對本月與上月 K 棒，自動縫合缺漏日"""
+    if not ticker.endswith('.TW') or df is None or df.empty:
+        return df
+        
+    symbol = ticker.replace('.TW', '')
+    now = datetime.now()
+    dates_to_check = [now.strftime('%Y%m01')]
+    first_day = now.replace(day=1)
+    prev_month = (first_day - timedelta(days=1)).strftime('%Y%m01')
+    dates_to_check.append(prev_month)
+    
+    patched_count = 0
+    df_dates = set(df.index.strftime('%Y-%m-%d'))
+    
+    for d_str in dates_to_check:
         try:
-            df = yf.download(
-                ticker,
-                period='5y',
-                progress=False,
-                auto_adjust=True
-            )
-            if df is not None and len(df) > 0:
-                print(f"✅ {ticker} 抓取成功，共 {len(df)} 筆")
+            url = f'https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={d_str}&stockNo={symbol}'
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            resp = urllib.request.urlopen(req, context=ssl_ctx, timeout=8)
+            data = json.loads(resp.read().decode('utf-8'))
+            if 'data' not in data:
+                continue
+            for row in data['data']:
+                parts = row[0].split('/')
+                ad_year = int(parts[0]) + 1911
+                iso_date = f'{ad_year}-{parts[1]}-{parts[2]}'
+                
+                # 若 Yahoo 漏掉此交易日，自動以證交所官方收盤價補齊
+                if iso_date not in df_dates:
+                    try:
+                        o = float(row[3].replace(',', ''))
+                        h = float(row[4].replace(',', ''))
+                        l = float(row[5].replace(',', ''))
+                        c = float(row[6].replace(',', ''))
+                        vol = float(row[1].replace(',', ''))
+                        ts = pd.Timestamp(iso_date) if df.index.tz is None else pd.Timestamp(iso_date, tz=df.index.tz)
+                        bar_data = {'Open': o, 'High': h, 'Low': l, 'Close': c, 'Volume': vol}
+                        if 'Adj Close' in df.columns:
+                            bar_data['Adj Close'] = c
+                        bar = pd.DataFrame([bar_data], index=[ts])
+                        df = pd.concat([df, bar])
+                        df_dates.add(iso_date)
+                        patched_count += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+            
+    if patched_count > 0:
+        df = df.sort_index()
+        print(f"🏛️ [Layer 3] TWSE 官方 API 自動補齊 {symbol} 遺漏的 {patched_count} 天 K 棒！")
+    return df
+
+def fetch_robust_market_data(ticker):
+    """整合 3 層防禦的資料抓取主函式"""
+    df = None
+    # 第 1 層：標準 yfinance
+    for attempt in range(2):
+        try:
+            df = yf.download(ticker, period='5y', progress=False, auto_adjust=True)
+            if df is not None and len(df) > 100:
+                print(f"✅ [Layer 1] yfinance 抓取成功 ({ticker})，共 {len(df)} 筆")
                 break
         except Exception as e:
-            print(f"⚠️ {ticker} 第 {attempt+1} 次失敗: {e}")
-        time.sleep(3)
+            print(f"⚠️ [Layer 1] yfinance 第 {attempt+1} 次抓取失敗 ({ticker}): {e}")
+        time.sleep(1)
+
+    # 第 2 層：若 yfinance 失敗或回傳空值，切換 Yahoo Direct JSON API
+    if df is None or len(df) < 100:
+        print(f"🔄 正在啟用第二層防禦 (Yahoo Direct API) 抓取 {ticker}...")
+        df = fetch_yahoo_direct(ticker)
 
     if df is None or len(df) == 0:
-        print(f"❌ {ticker} 最終抓取失敗")
+        print(f"❌ {ticker} 所有外部連線均告急")
         return None
 
+    # 清理欄位格式
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # 執行歷史資料缺失補齊
+    # 第 3 層：台股向 TWSE 自動對帳補齊
+    df = auto_patch_twse(ticker, df)
+
+    # 執行已知手動補齊庫（雙重保險）
     df = apply_data_patches(ticker, df)
 
-    # 針對 Yahoo Finance Bug：最後一天如果有開盤/有量，但收盤價是 NaN，手動用即時報價補上
+    # 針對最後一天即時報價 NaN 的容錯
     if len(df) > 0 and pd.isna(df['Close'].iloc[-1]):
         try:
             last_price = yf.Ticker(ticker).fast_info.last_price
             df.iloc[-1, df.columns.get_loc('Close')] = last_price
-            if pd.isna(df['High'].iloc[-1]):
-                df.iloc[-1, df.columns.get_loc('High')] = last_price
-            if pd.isna(df['Low'].iloc[-1]):
-                df.iloc[-1, df.columns.get_loc('Low')] = last_price
-            if pd.isna(df['Open'].iloc[-1]):
-                df.iloc[-1, df.columns.get_loc('Open')] = last_price
-            print(f"🔧 已使用即時報價 {last_price} 修補 {ticker} 的缺失資料")
-        except Exception as e:
-            print(f"⚠️ 嘗試修補最新價格失敗: {e}")
+            for col in ['High', 'Low', 'Open']:
+                if col in df.columns and pd.isna(df[col].iloc[-1]):
+                    df.iloc[-1, df.columns.get_loc(col)] = last_price
+        except Exception:
+            pass
+
+    return df
+
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs):
+    df = fetch_robust_market_data(ticker)
+    if df is None or len(df) == 0:
+        return None
 
     max_idx = len(allocs) - 1
     in_trend = False
@@ -104,7 +211,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     df['SMA_slow'] = df['Close'].rolling(window=slow_ma).mean()
     df['High_bw'] = df['High'].shift(1).rolling(window=breakout_window).max()
     df['Low_bw']  = df['Low'].shift(1).rolling(window=breakout_window).min()
-    df = df.dropna()
+    df = df.dropna(subset=['Close', 'High', 'Low', 'SMA_slow', 'High_bw', 'Low_bw'])
 
     for i in range(len(df)):
         current_close = df['Close'].iloc[i]
@@ -240,18 +347,35 @@ def refresh_cache():
     print("🔄 正在更新市場資料快取...")
 
     try:
+        # 保存既有快取資料，用於單一標的斷線時的保底防禦 (Layer 4)
+        old_data_map = {}
+        if _cache['data']:
+            for item in _cache['data']:
+                old_data_map[item['ticker']] = item
+
         qqq = compute_signal(
             name="美股 QQQ", ticker="QQQ",
             base_leverage=0.8, max_leverage=3.0,
             fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
             allocs=[0.0, 0.5, 0.8, 1.0]
         )
+        if qqq is None and 'QQQ' in old_data_map:
+            print("🛡️ [Layer 4] QQQ 啟動離線快取保底，沿用前次有效訊號")
+            qqq = old_data_map['QQQ'].copy()
+            if not qqq['explanation'].startswith('⚠️【連線維護】'):
+                qqq['explanation'] = "⚠️【連線維護中 · 沿用前次訊號】" + qqq['explanation']
+
         tw = compute_signal(
             name="台股 006208", ticker="006208.TW",
             base_leverage=0.6, max_leverage=3.0,
             fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
             allocs=[0.0, 0.4, 0.7, 0.9, 1.0]
         )
+        if tw is None and '006208.TW' in old_data_map:
+            print("🛡️ [Layer 4] 006208 啟動離線快取保底，沿用前次有效訊號")
+            tw = old_data_map['006208.TW'].copy()
+            if not tw['explanation'].startswith('⚠️【連線維護】'):
+                tw['explanation'] = "⚠️【連線維護中 · 沿用前次訊號】" + tw['explanation']
 
         results = [x for x in [qqq, tw] if x is not None]
         if results:
