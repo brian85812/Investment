@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>護城河戰情儀表板</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=4">
+    <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
     <div class="app-container">
@@ -19,6 +19,20 @@
             <div class="spinner"></div>
             <p class="loading-text">正在分析即時大盤數據...</p>
         </main>
+
+        <!-- 期貨轉倉智能雷達 -->
+        <section id="rollover-radar" class="glass-card rollover-section">
+            <div class="card-header rollover-header">
+                <div>
+                    <h2>🎯 期貨轉倉智能雷達</h2>
+                    <p class="sub-desc">台指 / 那指 結算期追蹤與價差換約 SOP</p>
+                </div>
+                <span class="radar-tag">LIVE SPREAD</span>
+            </div>
+            <div id="rollover-cards" class="rollover-grid">
+                <div class="rollover-loading">載入轉倉排程中...</div>
+            </div>
+        </section>
     </div>
 
     <!-- 範本：市場卡片 -->
@@ -72,6 +86,6 @@
         </div>
     </template>
 
-    <script src="/static/script.js?v=6"></script>
+    <script src="/static/script.js?v=12"></script>
 </body>
 </html>

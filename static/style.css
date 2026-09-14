@@ -166,6 +166,16 @@ header p {
     color: var(--bear-color);
     border: 1px solid rgba(239, 68, 68, 0.3);
 }
+.status-badge.neutral {
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--text-muted);
+    border: 1px solid rgba(148, 163, 184, 0.3);
+}
+.status-badge.warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--warning-color);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
 
 .market-stats {
     display: grid;
@@ -271,6 +281,27 @@ input:focus {
 .action-instruction.sell { color: var(--warning-color); }
 .action-instruction.hold { color: var(--text-muted); }
 
+/* Leverage Trimming Check (5% 容差帶健檢) */
+.lev-check {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.lev-check.lev-ok {
+    background: rgba(16, 185, 129, 0.08);
+    border-left: 3px solid var(--bull-color);
+    color: #d1fae5;
+}
+
+.lev-check.lev-danger {
+    background: rgba(239, 68, 68, 0.1);
+    border-left: 3px solid var(--bear-color);
+    color: #fee2e2;
+}
+
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(5px); }
     to { opacity: 1; transform: translateY(0); }
@@ -313,4 +344,243 @@ input:focus {
     border-left: 3px solid rgba(59, 130, 246, 0.4);
     padding: 10px 12px;
     border-radius: 4px;
+}
+
+/* ========================================================
+   Rollover Radar Section (期貨轉倉智能雷達)
+   ======================================================== */
+.rollover-section {
+    margin-top: 28px;
+}
+
+.rollover-header {
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+}
+
+.sub-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.radar-tag {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    color: #10b981;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.radar-tag::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #10b981;
+    box-shadow: 0 0 8px #10b981;
+    animation: pulseGlow 1.5s infinite;
+}
+
+@keyframes pulseGlow {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.3; transform: scale(0.8); }
+}
+
+.rollover-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+}
+
+@media (min-width: 850px) {
+    .rollover-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+.rollover-loading {
+    color: var(--text-muted);
+    text-align: center;
+    padding: 24px;
+    font-size: 14px;
+}
+
+/* Card Styling */
+.rollover-card {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: all 0.2s ease;
+}
+
+.rollover-card.bull {
+    border-color: rgba(16, 185, 129, 0.4);
+    box-shadow: 0 0 16px rgba(16, 185, 129, 0.08);
+}
+
+.rollover-card.warning {
+    border-color: rgba(245, 158, 11, 0.35);
+}
+
+.rollover-card.bear {
+    border-color: rgba(239, 68, 68, 0.45);
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.1);
+}
+
+/* Header */
+.ro-header-compact {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.ro-title-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.ro-market-name {
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+}
+
+.ro-contract-tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #cbd5e1;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Summary Bar */
+.ro-summary-bar {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.ro-countdown-chip {
+    font-size: 12px;
+    color: #94a3b8;
+}
+
+.ro-countdown-chip strong {
+    color: #10b981;
+    font-size: 14px;
+}
+
+.ro-countdown-chip.urgent strong {
+    color: #ef4444;
+}
+
+.ro-action-hint {
+    font-size: 13px;
+    color: #e2e8f0;
+    line-height: 1.5;
+}
+
+/* Quick Checker (Single Row) */
+.ro-quick-checker {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 8px 12px;
+}
+
+.ro-input-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.ro-input-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-blue);
+    white-space: nowrap;
+}
+
+.ro-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    max-width: 260px;
+}
+
+.ro-spread-input {
+    width: 100%;
+    padding: 6px 10px;
+    font-size: 13px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: #fff;
+    text-align: right;
+    font-family: inherit;
+    transition: all 0.2s ease;
+}
+
+.ro-spread-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.ro-input-unit {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* Compact Verdict */
+.ro-verdict-compact {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.5;
+    animation: fadeIn 0.2s ease;
+}
+
+.ro-verdict-compact.bull {
+    background: rgba(16, 185, 129, 0.12);
+    border-left: 3px solid var(--bull-color);
+    color: #d1fae5;
+}
+
+.ro-verdict-compact.neutral {
+    background: rgba(245, 158, 11, 0.12);
+    border-left: 3px solid var(--warning-color);
+    color: #fef3c7;
+}
+
+.ro-verdict-compact.bear {
+    background: rgba(239, 68, 68, 0.12);
+    border-left: 3px solid var(--bear-color);
+    color: #fee2e2;
+}
+
+.font-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }

@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 import logging
@@ -442,6 +442,139 @@ def health():
         'cache_age': str(datetime.now() - _cache['last_updated']) if _cache['last_updated'] else 'no cache yet',
         'is_updating': _cache['is_updating']
     })
+
+# ========================================================
+# 🎯 期貨轉倉智能雷達 (Rollover Radar)
+# ========================================================
+def compute_rollover_radar():
+    today = datetime.now().date()
+    
+    # 1. 台指期結算計算 (每月第 3 個週三)
+    def third_wed(year, month):
+        d1 = date(year, month, 1)
+        w1 = d1 + timedelta(days=(2 - d1.weekday()) % 7)
+        return w1 + timedelta(weeks=2)
+        
+    y, m = today.year, today.month
+    tw_settlement = third_wed(y, m)
+    current_m = m
+    next_m = m + 1 if m < 12 else 1
+    if today > tw_settlement:
+        y, m = (y, m + 1) if m < 12 else (y + 1, 1)
+        tw_settlement = third_wed(y, m)
+        current_m = m
+        next_m = m + 1 if m < 12 else 1
+        
+    tw_days_left = (tw_settlement - today).days
+    tw_cur_code = f"{current_m:02d}月"
+    tw_next_code = f"{next_m:02d}月"
+    
+    if tw_days_left > 5:
+        tw_badge = "⚪ 常規持有"
+        tw_class = "neutral"
+        tw_phase = "hold"
+        tw_action = f"距結算還有 {tw_days_left} 天，安心持倉無需理會價差。"
+    elif tw_days_left >= 3:
+        tw_badge = "📋 開始觀察"
+        tw_class = "warning"
+        tw_phase = "watch"
+        tw_action = f"倒數 {tw_days_left} 天，次月增溫中，每天瞄一眼價差，夠甜就轉。"
+    elif tw_days_left in [1, 2]:
+        tw_badge = "🎯 黃金轉倉期"
+        tw_class = "bull"
+        tw_phase = "go"
+        tw_action = "次月流動性超過 85%，建議立即使用【跨月價差單】掛限價換約！"
+    else:
+        tw_badge = "🚨 今日結算"
+        tw_class = "bear"
+        tw_phase = "deadline"
+        tw_action = "今日 13:30 結算！不管價差多少，請立即以價差單換約避免斷倉！"
+
+    # 2. 美股那指期 (NQ/MNQ) 結算計算 (3/6/9/12月 第 3 個週五)
+    def third_fri(year, month):
+        d1 = date(year, month, 1)
+        f1 = d1 + timedelta(days=(4 - d1.weekday()) % 7)
+        return f1 + timedelta(weeks=2)
+        
+    q_months = [3, 6, 9, 12]
+    q_codes = {3: 'H', 6: 'M', 9: 'U', 12: 'Z'}
+    us_y, us_m = today.year, today.month
+    us_settlement = None
+    us_cur_q = None
+    us_next_q = None
+    
+    for i, qm in enumerate(q_months):
+        if qm >= us_m:
+            tf = third_fri(us_y, qm)
+            if today <= tf:
+                us_settlement = tf
+                us_cur_q = qm
+                us_next_q = q_months[(i + 1) % 4]
+                break
+    if us_settlement is None:
+        us_settlement = third_fri(us_y + 1, 3)
+        us_cur_q = 3
+        us_next_q = 6
+        
+    us_days_left = (us_settlement - today).days
+    roll_week_start = us_settlement - timedelta(days=8)
+    watch_start = us_settlement - timedelta(days=14)
+    cur_code_str = f"NQ{q_codes[us_cur_q]}{str(us_settlement.year)[-1]}"
+    next_code_str = f"NQ{q_codes[us_next_q]}{str(us_settlement.year + (1 if us_next_q==3 else 0))[-1]}"
+    
+    if today < watch_start:
+        us_badge = "⚪ 常規持有"
+        us_class = "neutral"
+        us_phase = "hold"
+        days_to_watch = (watch_start - today).days
+        us_action = f"距觀察期還有 {days_to_watch} 天，近月深度最佳，安心持有。"
+    elif today < roll_week_start:
+        us_badge = "📋 開始觀察"
+        us_class = "warning"
+        us_phase = "watch"
+        days_to_roll = (roll_week_start - today).days
+        us_action = f"距 Roll Week 還有 {days_to_roll} 天，可開始留意跨季價差與年化溢價率。"
+    elif roll_week_start <= today < us_settlement:
+        us_badge = "🎯 CME Roll Week"
+        us_class = "bull"
+        us_phase = "go"
+        us_action = f"次季量能已超越當季，建議使用【Calendar Spread】掛 Mid-Price 換約！"
+    else:
+        us_badge = "🚨 四巫日結算"
+        us_class = "bear"
+        us_phase = "deadline"
+        us_action = "今日到期結算！造市商抽單中，請立即以價差單完成轉倉！"
+
+    return {
+        'tw': {
+            'market': '台指期 (TX / MTX / TMF)',
+            'contract_info': f'當月 {tw_cur_code} ➔ 次月 {tw_next_code}',
+            'settlement_date': tw_settlement.strftime('%Y-%m-%d'),
+            'days_left': tw_days_left,
+            'badge': tw_badge,
+            'status_class': tw_class,
+            'phase': tw_phase,
+            'action': tw_action,
+            'rule_tip': '💡 判定準則：若「遠月價格 < 加權現貨」（逆價差），為無腦送分題直接轉倉！'
+        },
+        'us': {
+            'market': '那指期 (NQ / MNQ)',
+            'contract_info': f'當季 {cur_code_str} ➔ 次季 {next_code_str}',
+            'settlement_date': us_settlement.strftime('%Y-%m-%d'),
+            'roll_start': roll_week_start.strftime('%Y-%m-%d'),
+            'watch_start': watch_start.strftime('%Y-%m-%d'),
+            'days_left': us_days_left,
+            'badge': us_badge,
+            'status_class': us_class,
+            'phase': us_phase,
+            'action': us_action,
+            'rule_tip': '💡 判定準則：以 Spread 限價單掛在買賣中間價（Mid-Price），若年化溢價率 < 4.8% 即為合理區間。'
+        }
+    }
+
+@app.route('/api/rollover')
+def get_rollover():
+    return jsonify(compute_rollover_radar())
 
 # ========================================================
 # 啟動
