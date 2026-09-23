@@ -196,7 +196,11 @@ def fetch_robust_market_data(ticker):
 
     return df
 
-def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs):
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, extension_guard=None):
+    """
+    extension_guard: dict with {'threshold': 1.16, 'cap': 2.2} or None to disable.
+    When Close/SMA_slow > threshold, target leverage is capped at cap.
+    """
     df = fetch_robust_market_data(ticker)
     if df is None or len(df) == 0:
         return None
@@ -213,6 +217,8 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     df['Low_bw']  = df['Low'].shift(1).rolling(window=breakout_window).min()
     df = df.dropna(subset=['Close', 'High', 'Low', 'SMA_slow', 'High_bw', 'Low_bw'])
 
+    ext_guard_active = False  # 追蹤最新一天是否觸發過熱冷卻
+
     for i in range(len(df)):
         current_close = df['Close'].iloc[i]
         sma_fast = df['SMA_fast'].iloc[i]
@@ -224,6 +230,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             in_trend = False
             step_idx = 0
             target_history.append(base_leverage)
+            ext_guard_active = False
             continue
 
         if sma_fast >= sma_slow and not in_trend:
@@ -240,7 +247,19 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     last_action_idx = i
 
         alloc_pct = allocs[step_idx]
-        target_history.append(base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct)
+        target = base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct
+
+        # === 乖離過熱冷卻器 (Extension Guard) ===
+        ext_guard_active = False
+        if extension_guard and sma_slow > 0:
+            ext_ratio = current_close / sma_slow
+            if ext_ratio > extension_guard['threshold']:
+                original_target = target
+                target = min(target, extension_guard['cap'])
+                if target < original_target:
+                    ext_guard_active = True
+
+        target_history.append(target)
 
     # === 計算前一天的目標槓桿 ===
     latest = df.iloc[-1]
@@ -316,6 +335,16 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 f"目標槓桿未變，無需動作，讓利潤奔跑！"
             )
 
+    # === 乖離過熱冷卻器附加說明 ===
+    ext_ratio_now = round(cur_p / s_ma, 4) if s_ma > 0 else 0
+    if ext_guard_active and extension_guard:
+        explanation += (
+            f" 🌡️【乖離過熱冷卻中】年線乖離率 {round(ext_ratio_now * 100 - 100, 1)}%"
+            f"（>{round((extension_guard['threshold'] - 1) * 100)}%），"
+            f"加碼上限壓制在 {extension_guard['cap']}x，"
+            f"待乖離收斂後恢復滿載權限。"
+        )
+
     # === 組合回傳資料 ===
     return {
         'id': ticker.replace('.', '_').lower(),
@@ -336,7 +365,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'low_bw': l_bw,
         'base_leverage': base_leverage,
         'max_leverage': max_leverage,
-        'explanation': explanation
+        'explanation': explanation,
+        'ext_guard_active': ext_guard_active,
+        'ext_ratio': round(ext_ratio_now, 4)
     }
 
 def refresh_cache():
@@ -357,7 +388,8 @@ def refresh_cache():
             name="美股 QQQ", ticker="QQQ",
             base_leverage=0.8, max_leverage=3.0,
             fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
-            allocs=[0.0, 0.5, 0.8, 1.0]
+            allocs=[0.0, 0.5, 0.8, 1.0],
+            extension_guard={'threshold': 1.16, 'cap': 2.2}
         )
         if qqq is None and 'QQQ' in old_data_map:
             print("🛡️ [Layer 4] QQQ 啟動離線快取保底，沿用前次有效訊號")

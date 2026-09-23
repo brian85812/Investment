@@ -44,6 +44,20 @@ document.addEventListener('DOMContentLoaded', () => {
                         badge.classList.add('bear');
                     }
 
+                    // 乖離過熱冷卻器 badge (美股專屬)
+                    if (market.ext_guard_active) {
+                        const extBadge = document.createElement('span');
+                        extBadge.className = 'status-badge ext-guard';
+                        extBadge.textContent = `🌡️ 過熱冷卻中 (乖離 ${((market.ext_ratio - 1) * 100).toFixed(1)}%)`;
+                        extBadge.style.cssText = 'background:#ff6b35;color:#fff;font-size:0.75rem;padding:2px 8px;border-radius:4px;margin-left:6px;';
+                        badge.parentNode.insertBefore(extBadge, badge.nextSibling);
+                    } else if (market.ext_ratio && market.ext_ratio > 1.0 && market.ticker === 'QQQ') {
+                        const extInfo = document.createElement('span');
+                        extInfo.style.cssText = 'font-size:0.7rem;color:#888;margin-left:6px;';
+                        extInfo.textContent = `乖離 ${((market.ext_ratio - 1) * 100).toFixed(1)}%`;
+                        badge.parentNode.insertBefore(extInfo, badge.nextSibling);
+                    }
+
                     clone.querySelector('.price').textContent = market.close.toFixed(2);
                     clone.querySelector('.target-lev').textContent = market.target_today.toFixed(2) + 'x';
                     clone.querySelector('.steps').textContent = `${market.step_idx} / ${market.max_steps}`;
