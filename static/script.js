@@ -2,8 +2,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const dashboard = document.getElementById('dashboard');
     const template = document.getElementById('market-card-template');
 
+    // 自動判斷執行環境：在 GitHub Pages 上讀取靜態 JSON，在本地 Flask 上讀取 /api 端點
+    const isStatic = window.location.hostname.includes('github.io') || window.location.protocol === 'file:';
+    const DATA_API_URL = isStatic ? './api_data.json' : '/api/data';
+    const ROLLOVER_API_URL = isStatic ? './api_rollover.json' : '/api/rollover';
+
     function fetchData(retryCount = 0) {
-        fetch('/api/data?t=' + new Date().getTime())
+        fetch(DATA_API_URL + '?t=' + new Date().getTime())
             .then(response => {
                 if (response.status === 202) {
                     // 伺服器正在預熱快取，30 秒後自動重試
@@ -170,7 +175,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const container = document.getElementById('rollover-cards');
         if (!container) return;
 
-        fetch('/api/rollover?t=' + new Date().getTime())
+        fetch(ROLLOVER_API_URL + '?t=' + new Date().getTime())
             .then(res => res.json())
             .then(data => {
                 container.innerHTML = '';
