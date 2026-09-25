@@ -34,7 +34,7 @@ body {
 .app-container {
     max-width: 600px;
     margin: 0 auto;
-    padding: 20px;
+    padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
     position: relative;
     overflow: hidden;
     transition: max-width 0.3s ease;
