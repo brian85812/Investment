@@ -63,6 +63,15 @@ document.addEventListener('DOMContentLoaded', () => {
                         badge.parentNode.insertBefore(extInfo, badge.nextSibling);
                     }
 
+                    // 牛初加速 badge (台股專屬)
+                    if (market.bull_accel_active) {
+                        const accelBadge = document.createElement('span');
+                        accelBadge.className = 'status-badge bull-accel';
+                        accelBadge.textContent = `🚀 牛初加速中 (${market.bull_accel_days_left}天)`;
+                        accelBadge.style.cssText = 'background:#8b5cf6;color:#fff;font-size:0.75rem;padding:2px 8px;border-radius:4px;margin-left:6px;';
+                        badge.parentNode.insertBefore(accelBadge, badge.nextSibling);
+                    }
+
                     clone.querySelector('.price').textContent = market.close.toFixed(2);
                     clone.querySelector('.target-lev').textContent = market.target_today.toFixed(2) + 'x';
                     clone.querySelector('.steps').textContent = `${market.step_idx} / ${market.max_steps}`;

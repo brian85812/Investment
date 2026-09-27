@@ -18,8 +18,6 @@ def build():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     dist_dir = os.path.join(base_dir, "dist")
     
-    if os.path.exists(dist_dir):
-        shutil.rmtree(dist_dir)
     os.makedirs(dist_dir, exist_ok=True)
 
     # 1. 運算市場信號
@@ -34,9 +32,10 @@ def build():
     
     tw = compute_signal(
         name="台股 006208", ticker="006208.TW",
-        base_leverage=0.6, max_leverage=3.0,
+        base_leverage=1.0, max_leverage=3.0,
         fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
-        allocs=[0.0, 0.4, 0.7, 0.9, 1.0]
+        allocs=[0.0, 0.4, 0.7, 0.9, 1.0],
+        bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40}
     )
     
     signals = [x for x in [qqq, tw] if x is not None]
@@ -59,7 +58,7 @@ def build():
     # 4. 複製靜態資源
     static_src = os.path.join(base_dir, "static")
     static_dst = os.path.join(dist_dir, "static")
-    shutil.copytree(static_src, static_dst)
+    shutil.copytree(static_src, static_dst, dirs_exist_ok=True)
     print(f"✅ 已複製 static 目錄到: {static_dst}")
 
     # 5. 處理 index.html (轉為相對路徑)

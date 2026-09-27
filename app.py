@@ -196,10 +196,11 @@ def fetch_robust_market_data(ticker):
 
     return df
 
-def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, extension_guard=None):
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, extension_guard=None, bull_acceleration=None):
     """
     extension_guard: dict with {'threshold': 1.16, 'cap': 2.2} or None to disable.
     When Close/SMA_slow > threshold, target leverage is capped at cap.
+    bull_acceleration: dict with {'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40} or None.
     """
     df = fetch_robust_market_data(ticker)
     if df is None or len(df) == 0:
@@ -218,6 +219,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     df = df.dropna(subset=['Close', 'High', 'Low', 'SMA_slow', 'High_bw', 'Low_bw'])
 
     ext_guard_active = False  # 追蹤最新一天是否觸發過熱冷卻
+    bear_counter = 0
+    accel_active = False
+    accel_timer = 0
 
     for i in range(len(df)):
         current_close = df['Close'].iloc[i]
@@ -231,10 +235,25 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             step_idx = 0
             target_history.append(base_leverage)
             ext_guard_active = False
+            bear_counter += 1
+            accel_active = False
+            accel_timer = 0
             continue
 
         if sma_fast >= sma_slow and not in_trend:
             in_trend = True
+            if bull_acceleration and bull_acceleration.get('enable', True) and bear_counter >= bull_acceleration.get('min_bear_days', 40):
+                accel_active = True
+                accel_timer = 0
+            bear_counter = 0
+
+        cur_base = base_leverage
+        if accel_active and bull_acceleration:
+            accel_timer += 1
+            cur_base = bull_acceleration.get('accel_base', 1.2)
+            if accel_timer >= bull_acceleration.get('accel_days', 252):
+                accel_active = False
+                cur_base = base_leverage
 
         if in_trend and (i - last_action_idx >= cooldown):
             if current_close > high_bw:
@@ -247,7 +266,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     last_action_idx = i
 
         alloc_pct = allocs[step_idx]
-        target = base_leverage * (1 - alloc_pct) + max_leverage * alloc_pct
+        target = cur_base * (1 - alloc_pct) + max_leverage * alloc_pct
 
         # === 乖離過熱冷卻器 (Extension Guard) ===
         ext_guard_active = False
@@ -345,6 +364,14 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             f"待乖離收斂後恢復滿載權限。"
         )
 
+    # === 牛初加速附加說明 ===
+    bull_accel_active = accel_active if bull_acceleration else False
+    bull_accel_days_left = max(0, bull_acceleration.get('accel_days', 252) - accel_timer) if (bull_acceleration and accel_active) else 0
+    if bull_accel_active:
+        explanation += (
+            f" 🚀【牛初加速中】底倉暫時調升至 {cur_base}x（剩餘 {bull_accel_days_left} 天），享受估值修復暴利。"
+        )
+
     # === 組合回傳資料 ===
     return {
         'id': ticker.replace('.', '_').lower(),
@@ -367,7 +394,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'max_leverage': max_leverage,
         'explanation': explanation,
         'ext_guard_active': ext_guard_active,
-        'ext_ratio': round(ext_ratio_now, 4)
+        'ext_ratio': round(ext_ratio_now, 4),
+        'bull_accel_active': bull_accel_active,
+        'bull_accel_days_left': bull_accel_days_left
     }
 
 def refresh_cache():
@@ -399,9 +428,10 @@ def refresh_cache():
 
         tw = compute_signal(
             name="台股 006208", ticker="006208.TW",
-            base_leverage=0.6, max_leverage=3.0,
+            base_leverage=1.0, max_leverage=3.0,
             fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
-            allocs=[0.0, 0.4, 0.7, 0.9, 1.0]
+            allocs=[0.0, 0.4, 0.7, 0.9, 1.0],
+            bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40}
         )
         if tw is None and '006208.TW' in old_data_map:
             print("🛡️ [Layer 4] 006208 啟動離線快取保底，沿用前次有效訊號")
