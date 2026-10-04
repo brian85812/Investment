@@ -222,6 +222,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     bear_counter = 0
     accel_active = False
     accel_timer = 0
+    below_ma_counter = 0
 
     for i in range(len(df)):
         current_close = df['Close'].iloc[i]
@@ -230,7 +231,12 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         high_bw  = df['High_bw'].iloc[i]
         low_bw   = df['Low_bw'].iloc[i]
 
-        if sma_fast < sma_slow or current_close < sma_slow:
+        if current_close < sma_slow:
+            below_ma_counter += 1
+        else:
+            below_ma_counter = 0
+
+        if sma_fast < sma_slow or below_ma_counter > 1:
             in_trend = False
             step_idx = 0
             target_history.append(base_leverage)
@@ -418,7 +424,7 @@ def refresh_cache():
             base_leverage=0.8, max_leverage=3.0,
             fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
             allocs=[0.0, 0.5, 0.8, 1.0],
-            extension_guard={'threshold': 1.16, 'cap': 2.2}
+            extension_guard={'threshold': 1.16, 'cap': 2.0}
         )
         if qqq is None and 'QQQ' in old_data_map:
             print("🛡️ [Layer 4] QQQ 啟動離線快取保底，沿用前次有效訊號")

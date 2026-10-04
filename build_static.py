@@ -27,7 +27,7 @@ def build():
         base_leverage=0.8, max_leverage=3.0,
         fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
         allocs=[0.0, 0.5, 0.8, 1.0],
-        extension_guard={'threshold': 1.16, 'cap': 2.2}
+        extension_guard={'threshold': 1.16, 'cap': 2.0}
     )
     
     tw = compute_signal(
