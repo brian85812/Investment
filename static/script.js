@@ -72,6 +72,15 @@ document.addEventListener('DOMContentLoaded', () => {
                         badge.parentNode.insertBefore(accelBadge, badge.nextSibling);
                     }
 
+                    // 深熊二階段減半 badge (C1 防禦)
+                    if (market.deep_bear_active) {
+                        const deepBadge = document.createElement('span');
+                        deepBadge.className = 'status-badge deep-bear';
+                        deepBadge.textContent = `🚨 深熊減半 (${market.target_today.toFixed(1)}x)`;
+                        deepBadge.style.cssText = 'background:#dc2626;color:#fff;font-size:0.75rem;padding:2px 8px;border-radius:4px;margin-left:6px;';
+                        badge.parentNode.insertBefore(deepBadge, badge.nextSibling);
+                    }
+
                     clone.querySelector('.price').textContent = market.close.toFixed(2);
                     clone.querySelector('.target-lev').textContent = market.target_today.toFixed(2) + 'x';
                     clone.querySelector('.steps').textContent = `${market.step_idx} / ${market.max_steps}`;

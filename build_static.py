@@ -28,7 +28,8 @@ def build():
         fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
         allocs=[0.0, 0.5, 0.8, 1.0],
         grace_days=0,
-        extension_guard={'threshold': 1.16, 'cap': 2.0}
+        extension_guard={'threshold': 1.16, 'cap': 2.0},
+        deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4}
     )
     
     tw = compute_signal(
@@ -37,7 +38,8 @@ def build():
         fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
         allocs=[0.0, 0.4, 0.7, 0.9, 1.0],
         grace_days=1,
-        bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40}
+        bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40},
+        deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5}
     )
     
     signals = [x for x in [qqq, tw] if x is not None]

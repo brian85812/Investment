@@ -196,11 +196,12 @@ def fetch_robust_market_data(ticker):
 
     return df
 
-def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None):
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None):
     """
     grace_days: 跌破年線容忍天數（美股 QQQ 為 0，台股 006208 為 1，即連續 2 天破線才確認）
     extension_guard: dict with {'threshold': 1.16, 'cap': 2.0} or None.
     bull_acceleration: dict with {'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40} or None.
+    deep_bear_guard: dict with {'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4} or None.
     """
     df = fetch_robust_market_data(ticker)
     if df is None or len(df) == 0:
@@ -211,13 +212,21 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     step_idx = 0
     last_action_idx = -999
     target_history = []
+    deep_bear_history = []
 
     df['SMA_fast'] = df['Close'].rolling(window=fast_ma).mean()
     df['SMA_slow'] = df['Close'].rolling(window=slow_ma).mean()
     # 修正 1：與 engine.py 回測完全一致，以收盤價 Close 計算 N 日突破與跌破通道
     df['High_bw'] = df['Close'].shift(1).rolling(window=breakout_window).max()
     df['Low_bw']  = df['Close'].shift(1).rolling(window=breakout_window).min()
-    df = df.dropna(subset=['Close', 'SMA_slow', 'High_bw', 'Low_bw'])
+    
+    subset_cols = ['Close', 'SMA_slow', 'High_bw', 'Low_bw']
+    if deep_bear_guard:
+        bear_w = deep_bear_guard.get('bear_ma', 60)
+        df['SMA_bear'] = df['Close'].rolling(window=bear_w).mean()
+        subset_cols.append('SMA_bear')
+
+    df = df.dropna(subset=subset_cols)
 
     ext_guard_active = False  # 追蹤最新一天是否觸發過熱冷卻
     bear_counter = 0
@@ -231,6 +240,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         sma_slow = df['SMA_slow'].iloc[i]
         high_bw  = df['High_bw'].iloc[i]
         low_bw   = df['Low_bw'].iloc[i]
+        sma_bear = df['SMA_bear'].iloc[i] if deep_bear_guard and 'SMA_bear' in df.columns else np.nan
 
         if current_close < sma_slow:
             below_ma_counter += 1
@@ -241,7 +251,14 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         if sma_fast < sma_slow or below_ma_counter > grace_days:
             in_trend = False
             step_idx = 0
-            target_history.append(base_leverage)
+            cur_b = base_leverage
+            is_deep = False
+            if deep_bear_guard and not pd.isna(sma_bear):
+                if sma_bear < sma_slow * deep_bear_guard.get('ratio', 0.97):
+                    cur_b = deep_bear_guard.get('deep_base', base_leverage)
+                    is_deep = True
+            target_history.append(cur_b)
+            deep_bear_history.append(is_deep)
             ext_guard_active = False
             bear_counter += 1
             accel_active = False
@@ -258,7 +275,14 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
         # 若仍在容忍期內 (below_ma_counter == 1) 但先前已是空頭 (not in_trend)，維持底倉防守
         if not in_trend:
-            target_history.append(base_leverage)
+            cur_b = base_leverage
+            is_deep = False
+            if deep_bear_guard and not pd.isna(sma_bear):
+                if sma_bear < sma_slow * deep_bear_guard.get('ratio', 0.97):
+                    cur_b = deep_bear_guard.get('deep_base', base_leverage)
+                    is_deep = True
+            target_history.append(cur_b)
+            deep_bear_history.append(is_deep)
             ext_guard_active = False
             bear_counter += 1
             continue
@@ -295,6 +319,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     ext_guard_active = True
 
         target_history.append(target)
+        deep_bear_history.append(False)
 
     # === 計算前一天的目標槓桿 ===
     latest = df.iloc[-1]
@@ -303,15 +328,33 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     s_ma = round(float(latest['SMA_slow']), 2)
     h_bw = round(float(latest['High_bw']), 2)
     l_bw = round(float(latest['Low_bw']), 2)
+    sma_bear_val = round(float(latest['SMA_bear']), 2) if 'SMA_bear' in latest and not pd.isna(latest['SMA_bear']) else None
 
     prev_target = round(target_history[-2], 2) if len(target_history) >= 2 else round(target_history[-1], 2)
     curr_target = round(target_history[-1], 2)
     trim_trigger = round(curr_target + 0.15, 2)
     lev_changed = curr_target != prev_target
+    deep_bear_active = deep_bear_history[-1] if deep_bear_history else False
 
-    # 修正 4：精準對應狀態機之說明文案（含台股 1-Day Grace Period 首日觀察提示）
+    # 修正 4：精準對應狀態機之說明文案（含深熊減半、台股 1-Day Grace Period 首日觀察提示）
     if not in_trend:
-        if cur_p < s_ma:
+        if deep_bear_active and deep_bear_guard:
+            bear_ratio = deep_bear_guard.get('ratio', 0.97)
+            bear_w = deep_bear_guard.get('bear_ma', 60)
+            bear_thresh = round(s_ma * bear_ratio, 2)
+            if lev_changed and curr_target < prev_target:
+                explanation = (
+                    f"🚨【深熊降底倉 {prev_target}x → {curr_target}x】"
+                    f"中期 {bear_w}MA ({sma_bear_val}) 跌破年線 {slow_ma}MA * {bear_ratio} ({bear_thresh})，"
+                    f"確認進入極度深熊期！底倉自 {base_leverage}x 強制減半至 {curr_target}x 防守避險。"
+                )
+            else:
+                explanation = (
+                    f"🛡️【深熊防禦 · 維持 {curr_target}x】"
+                    f"中期 {bear_w}MA ({sma_bear_val}) 持續低於年線 {slow_ma}MA * {bear_ratio} ({bear_thresh})，"
+                    f"處於深熊減半防護中（底倉減半至 {curr_target}x）。耐心等待均線修復重啟。"
+                )
+        elif cur_p < s_ma:
             if lev_changed and curr_target < prev_target:
                 explanation = (
                     f"🚨【防禦降槓 {prev_target}x → {curr_target}x】"
@@ -408,7 +451,10 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'ext_guard_active': ext_guard_active,
         'ext_ratio': round(ext_ratio_now, 4),
         'bull_accel_active': bull_accel_active,
-        'bull_accel_days_left': bull_accel_days_left
+        'bull_accel_days_left': bull_accel_days_left,
+        'deep_bear_active': deep_bear_active,
+        'sma_bear_val': sma_bear_val,
+        'deep_bear_ratio': deep_bear_guard.get('ratio', 0.97) if deep_bear_guard else None
     }
 
 def refresh_cache():
@@ -431,7 +477,8 @@ def refresh_cache():
             fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
             allocs=[0.0, 0.5, 0.8, 1.0],
             grace_days=0,
-            extension_guard={'threshold': 1.16, 'cap': 2.0}
+            extension_guard={'threshold': 1.16, 'cap': 2.0},
+            deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4}
         )
         if qqq is None and 'QQQ' in old_data_map:
             print("🛡️ [Layer 4] QQQ 啟動離線快取保底，沿用前次有效訊號")
@@ -445,7 +492,8 @@ def refresh_cache():
             fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
             allocs=[0.0, 0.4, 0.7, 0.9, 1.0],
             grace_days=1,
-            bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40}
+            bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40},
+            deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5}
         )
         if tw is None and '006208.TW' in old_data_map:
             print("🛡️ [Layer 4] 006208 啟動離線快取保底，沿用前次有效訊號")
