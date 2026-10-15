@@ -84,7 +84,7 @@ def fetch_yahoo_direct(ticker):
             'Open': quote['open'],
             'High': quote['high'],
             'Low': quote['low'],
-            'Close': quote['close'],
+            'Close': adj_close if adj_close is not None else quote['close'],
             'Adj Close': adj_close,
             'Volume': quote['volume']
         }, index=pd.to_datetime(timestamps, unit='s'))
@@ -196,10 +196,10 @@ def fetch_robust_market_data(ticker):
 
     return df
 
-def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, extension_guard=None, bull_acceleration=None):
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None):
     """
-    extension_guard: dict with {'threshold': 1.16, 'cap': 2.2} or None to disable.
-    When Close/SMA_slow > threshold, target leverage is capped at cap.
+    grace_days: 跌破年線容忍天數（美股 QQQ 為 0，台股 006208 為 1，即連續 2 天破線才確認）
+    extension_guard: dict with {'threshold': 1.16, 'cap': 2.0} or None.
     bull_acceleration: dict with {'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40} or None.
     """
     df = fetch_robust_market_data(ticker)
@@ -214,9 +214,10 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
     df['SMA_fast'] = df['Close'].rolling(window=fast_ma).mean()
     df['SMA_slow'] = df['Close'].rolling(window=slow_ma).mean()
-    df['High_bw'] = df['High'].shift(1).rolling(window=breakout_window).max()
-    df['Low_bw']  = df['Low'].shift(1).rolling(window=breakout_window).min()
-    df = df.dropna(subset=['Close', 'High', 'Low', 'SMA_slow', 'High_bw', 'Low_bw'])
+    # 修正 1：與 engine.py 回測完全一致，以收盤價 Close 計算 N 日突破與跌破通道
+    df['High_bw'] = df['Close'].shift(1).rolling(window=breakout_window).max()
+    df['Low_bw']  = df['Close'].shift(1).rolling(window=breakout_window).min()
+    df = df.dropna(subset=['Close', 'SMA_slow', 'High_bw', 'Low_bw'])
 
     ext_guard_active = False  # 追蹤最新一天是否觸發過熱冷卻
     bear_counter = 0
@@ -236,7 +237,8 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         else:
             below_ma_counter = 0
 
-        if sma_fast < sma_slow or below_ma_counter > 1:
+        # 修正 2：依各市場專屬 grace_days 判定破線（美股 >0 即當日砍，台股 >1 即連兩日砍）
+        if sma_fast < sma_slow or below_ma_counter > grace_days:
             in_trend = False
             step_idx = 0
             target_history.append(base_leverage)
@@ -246,12 +248,20 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             accel_timer = 0
             continue
 
-        if sma_fast >= sma_slow and not in_trend:
+        # 修正 3：重啟多頭與牛初加速必須同時滿足「快線 >= 慢線」且「收盤價 >= 慢線」
+        if sma_fast >= sma_slow and current_close >= sma_slow and not in_trend:
             in_trend = True
             if bull_acceleration and bull_acceleration.get('enable', True) and bear_counter >= bull_acceleration.get('min_bear_days', 40):
                 accel_active = True
                 accel_timer = 0
             bear_counter = 0
+
+        # 若仍在容忍期內 (below_ma_counter == 1) 但先前已是空頭 (not in_trend)，維持底倉防守
+        if not in_trend:
+            target_history.append(base_leverage)
+            ext_guard_active = False
+            bear_counter += 1
+            continue
 
         cur_base = base_leverage
         if accel_active and bull_acceleration:
@@ -296,68 +306,63 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
     prev_target = round(target_history[-2], 2) if len(target_history) >= 2 else round(target_history[-1], 2)
     curr_target = round(target_history[-1], 2)
+    trim_trigger = round(curr_target + 0.15, 2)
     lev_changed = curr_target != prev_target
 
-    # === 判斷狀態並生成詳細說明 ===
-    if cur_p < s_ma:
-        # 收盤價跌破年線
-        if lev_changed and curr_target < prev_target:
-            explanation = (
-                f"🚨【防禦降槓 {prev_target}x → {curr_target}x】"
-                f"收盤價 ({cur_p}) 跌破年線 {slow_ma}MA ({s_ma})，"
-                f"觸發護城河最高防線！動能階梯強制歸零，"
-                f"從 {prev_target}x 急降至底倉 {curr_target}x。"
-                f"嚴禁手動加碼，等待系統重啟訊號。"
-            )
+    # 修正 4：精準對應狀態機之說明文案（含台股 1-Day Grace Period 首日觀察提示）
+    if not in_trend:
+        if cur_p < s_ma:
+            if lev_changed and curr_target < prev_target:
+                explanation = (
+                    f"🚨【防禦降槓 {prev_target}x → {curr_target}x】"
+                    f"收盤價 ({cur_p}) 確認跌破年線 {slow_ma}MA ({s_ma})，"
+                    f"觸發護城河最高防線！動能階梯強制歸零，"
+                    f"急降至底倉 {curr_target}x。嚴禁手動加碼，等待重啟訊號。"
+                )
+            else:
+                explanation = (
+                    f"🛡️【防禦狀態 · 維持 {curr_target}x】"
+                    f"收盤價 ({cur_p}) 持續低於年線 {slow_ma}MA ({s_ma})，"
+                    f"維持最低底倉 {curr_target}x 防守避險。"
+                    f"距離年線還有 {round(s_ma - cur_p, 2)} 點，耐心等待均線修復。"
+                )
         else:
             explanation = (
-                f"🛡️【防禦狀態 · 維持 {curr_target}x】"
-                f"收盤價 ({cur_p}) 持續低於年線 {slow_ma}MA ({s_ma})，"
-                f"維持最低底倉 {curr_target}x 防守避險。"
-                f"距離年線還有 {round(s_ma - cur_p, 2)} 點，耐心等待均線修復。"
+                f"👀【觀察狀態 · 維持 {curr_target}x】"
+                f"收盤價 ({cur_p}) 雖在年線 {slow_ma}MA ({s_ma}) 之上，"
+                f"但短線 {fast_ma}MA ({f_ma}) 尚未黃金交叉，維持底倉 {curr_target}x 待命。"
             )
-    elif f_ma < s_ma:
-        # 快線尚未站上慢線
-        explanation = (
-            f"👀【觀察狀態 · 維持 {curr_target}x】"
-            f"收盤價 ({cur_p}) 雖在年線 {slow_ma}MA ({s_ma}) 之上，"
-            f"但短線 {fast_ma}MA ({f_ma}) 尚未黃金交叉，多頭架構未完整確立。"
-            f"快線距慢線 {round(s_ma - f_ma, 2)} 點，維持底倉 {curr_target}x 待命。"
-        )
     else:
-        # 多頭環境
-        if step_idx == 0:
+        if cur_p < s_ma and below_ma_counter <= grace_days:
+            explanation = (
+                f"⚠️【破線容忍觀察期 (第 {below_ma_counter}/{grace_days} 天) · 暫維 {curr_target}x】"
+                f"收盤價 ({cur_p}) 首日跌破年線 {slow_ma}MA ({s_ma})，啟動台股 1-Day Grace Period 防洗盤保護！"
+                f"若明日收盤未能站回年線之上，將正式確認破線並強制退回底倉 {base_leverage}x。"
+            )
+        elif step_idx == 0:
             diff_h = round(h_bw - cur_p, 2)
             explanation = (
                 f"🚀【多頭待命 · 維持 {curr_target}x】"
-                f"雙均線多頭確立 ({fast_ma}MA {f_ma} > {slow_ma}MA {s_ma})，"
-                f"距第一階加碼門檻（突破近 {breakout_window} 日最高點 {h_bw}）差 {max(diff_h, 0.01)} 點。"
-                f"突破前高前維持底倉，避免在震盪區追高！"
+                f"雙均線多頭確立 ({fast_ma}MA {f_ma} >= {slow_ma}MA {s_ma})，"
+                f"距第一階加碼門檻（收盤突破近 {breakout_window} 日最高收盤 {h_bw}）差 {max(diff_h, 0.01)} 點。"
             )
         elif lev_changed and curr_target > prev_target:
-            # 加碼升階
             explanation = (
                 f"📈【突破加碼 {prev_target}x → {curr_target}x】"
-                f"收盤價 ({cur_p}) 突破近 {breakout_window} 日最高點 ({h_bw})！"
-                f"動能階梯升至 {step_idx}/{max_idx}，槓桿從 {prev_target}x 提升至 {curr_target}x。"
-                f"下一階加碼需再次突破新高，減碼防線在 {l_bw} 以下。"
+                f"收盤價 ({cur_p}) 突破近 {breakout_window} 日最高收盤 ({h_bw})！"
+                f"動能階梯升至 {step_idx}/{max_idx}，槓桿升至 {curr_target}x（修剪警戒線 {trim_trigger}x）。"
             )
         elif lev_changed and curr_target < prev_target:
-            # 減碼降階
             explanation = (
                 f"📉【跌破減碼 {prev_target}x → {curr_target}x】"
-                f"收盤價 ({cur_p}) 跌破近 {breakout_window} 日最低點 ({l_bw})！"
-                f"動能階梯降至 {step_idx}/{max_idx}，槓桿從 {prev_target}x 壓回 {curr_target}x。"
-                f"若實際槓桿超過 {curr_target}x，須強制賣出部位壓回目標。"
+                f"收盤價 ({cur_p}) 跌破近 {breakout_window} 日最低收盤 ({l_bw})！"
+                f"動能階梯降至 {step_idx}/{max_idx}，若實際槓桿 > {curr_target}x 須賣出壓回目標。"
             )
         else:
-            # 維持中（多頭進攻，無變化）
             explanation = (
                 f"⚡【多頭進攻 · 維持 {curr_target}x】"
-                f"雙均線多頭且已確認 {step_idx} 次突破，"
                 f"動能階梯 {step_idx}/{max_idx}，槓桿維持 {curr_target}x。"
-                f"加碼門檻: >{h_bw}，減碼門檻: <{l_bw}。"
-                f"目標槓桿未變，無需動作，讓利潤奔跑！"
+                f"加碼門檻: >{h_bw}，減碼門檻: <{l_bw}，超標修剪線: >{trim_trigger}x（突破直砍回 {curr_target}x）。"
             )
 
     # === 乖離過熱冷卻器附加說明 ===
@@ -390,6 +395,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'max_steps': max_idx,
         'target_today': curr_target,
         'target_yesterday': prev_target,
+        'trim_trigger_lev': trim_trigger,
         'sma_fast_val': f_ma,
         'sma_slow_val': s_ma,
         'fast_ma_len': fast_ma,
@@ -424,6 +430,7 @@ def refresh_cache():
             base_leverage=0.8, max_leverage=3.0,
             fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
             allocs=[0.0, 0.5, 0.8, 1.0],
+            grace_days=0,
             extension_guard={'threshold': 1.16, 'cap': 2.0}
         )
         if qqq is None and 'QQQ' in old_data_map:
@@ -437,6 +444,7 @@ def refresh_cache():
             base_leverage=1.0, max_leverage=3.0,
             fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
             allocs=[0.0, 0.4, 0.7, 0.9, 1.0],
+            grace_days=1,
             bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40}
         )
         if tw is None and '006208.TW' in old_data_map:
