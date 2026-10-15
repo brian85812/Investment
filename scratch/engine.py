@@ -69,6 +69,8 @@ def target_lev(d, base, mx, f, s, bo, cd, allocs, grace_days=0, ext=None, accel=
                 if accel and def_days >= accel[0]:
                     acc_left = accel[2]
                 def_days = 0
+            else:
+                def_days += 1
         if in_tr and i - last >= cd:
             if p0 > h and step < len(allocs) - 1:
                 step += 1; last = i

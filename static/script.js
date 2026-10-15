@@ -35,6 +35,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 data.forEach(market => {
                     if(!market) return;
+                    if (market.ticker === 'QQQ' && market.close) {
+                        window.latestQqqClose = market.close;
+                        const nqBaseSpan = document.querySelector('.ro-nq-base');
+                        if (nqBaseSpan) {
+                            nqBaseSpan.textContent = `(基準點位: ~${Math.round(market.close * 41.15)} 點)`;
+                        }
+                    }
 
                     const clone = template.content.cloneNode(true);
 
@@ -112,6 +119,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const equityInput = clone.querySelector('.equity-input');
                     const positionInput = clone.querySelector('.position-input');
+                    const dcaInput = clone.querySelector('.dca-input');
                     const resultBox = clone.querySelector('.action-result');
                     const summaryDiv = clone.querySelector('.calc-summary');
                     const instructionDiv = clone.querySelector('.action-instruction');
@@ -120,7 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const fmt = (n) => n.toLocaleString(undefined, {maximumFractionDigits:0});
 
-                    // 輸入淨值 → 自動反推「目標部位應為多少」
+                    // 輸入淨值 → 若無部位則自動反推，若已有部位則直接檢驗
                     equityInput.addEventListener('input', () => {
                         lastEdited = 'equity';
                         const equity = parseFloat(equityInput.value);
@@ -128,12 +136,24 @@ document.addEventListener('DOMContentLoaded', () => {
                             resultBox.classList.add('hidden');
                             return;
                         }
-                        const targetPos = equity * market.target_today;
-                        positionInput.value = Math.round(targetPos);
-                        calculateAction(equity, targetPos);
+                        const posVal = positionInput.value.trim();
+                        if (posVal === '') {
+                            const targetPos = Math.round(equity * market.target_today);
+                            positionInput.value = targetPos;
+                            calculateAction(equity, targetPos);
+                        } else {
+                            const position = parseFloat(posVal);
+                            if (isNaN(position) || position <= 0) {
+                                const targetPos = Math.round(equity * market.target_today);
+                                positionInput.value = targetPos;
+                                calculateAction(equity, targetPos);
+                            } else {
+                                calculateAction(equity, position);
+                            }
+                        }
                     });
 
-                    // 輸入部位 → 自動反推「需要多少淨值」
+                    // 輸入部位 → 嚴禁覆寫 equityInput.value！
                     positionInput.addEventListener('input', () => {
                         lastEdited = 'position';
                         const position = parseFloat(positionInput.value);
@@ -141,16 +161,36 @@ document.addEventListener('DOMContentLoaded', () => {
                             resultBox.classList.add('hidden');
                             return;
                         }
-                        const neededEquity = position / market.target_today;
-                        equityInput.value = Math.round(neededEquity);
+                        const eqVal = equityInput.value.trim();
+                        if (eqVal !== '') {
+                            const equity = parseFloat(eqVal);
+                            if (!isNaN(equity) && equity > 0) {
+                                calculateAction(equity, position);
+                                return;
+                            }
+                        }
+                        // 若 equity 為空，才反推建議淨值
+                        const neededEquity = Math.round(position / market.target_today);
+                        equityInput.value = neededEquity;
                         calculateAction(neededEquity, position);
                     });
+
+                    // 輸入本月新增資金 DCA
+                    if (dcaInput) {
+                        dcaInput.addEventListener('input', () => {
+                            const equity = parseFloat(equityInput.value);
+                            const position = parseFloat(positionInput.value);
+                            if (!isNaN(equity) && equity > 0 && !isNaN(position) && position > 0) {
+                                calculateAction(equity, position);
+                            }
+                        });
+                    }
 
                     function calculateAction(equity, position) {
                         const targetToday = market.target_today;
                         const targetPos = equity * targetToday;
                         const actualLev = position / equity;
-                        const trimLine = targetToday * 1.05; // 5% 相對容差帶
+                        const trimLine = market.trim_trigger_lev || (targetToday + 0.15); // 固定 +0.15x 絕對容差帶
 
                         resultBox.classList.remove('hidden');
                         instructionDiv.className = 'action-instruction';
@@ -158,21 +198,23 @@ document.addEventListener('DOMContentLoaded', () => {
                         const marginAcct = Math.round(equity * 2/3);
                         const idleCash = Math.round(equity * 1/3);
 
-                        // 槓桿健檢區塊
+                        // 判斷是否需要進行真實槓桿偏離檢驗 (部位與目標部位存在差異，或手動修改過部位)
+                        const isDeviation = Math.abs(actualLev - targetToday) >= 0.01 || lastEdited === 'position';
+
                         let levCheck = '';
-                        if (lastEdited === 'position') {
+                        if (isDeviation) {
                             const diff = actualLev - targetToday;
                             if (actualLev < targetToday) {
                                 levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（低於目標 ${targetToday.toFixed(2)}x）— 自然衰退中，<strong>完全不動作</strong>，讓利潤奔跑。</div>`;
                             } else if (actualLev <= trimLine) {
-                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（目標 ${targetToday.toFixed(2)}x ～ 修剪線 ${trimLine.toFixed(2)}x 之間）— 落在 <strong>5% 容差帶內</strong>，日常雜訊不需碰它。</div>`;
+                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（目標 ${targetToday.toFixed(2)}x ～ 修剪線 ${trimLine.toFixed(2)}x 之間）— 落在 <strong>+0.15x 修剪緩衝帶內</strong>，日常雜訊不需碰它。</div>`;
                             } else {
                                 const excessPos = Math.round(position - targetPos);
                                 levCheck = `<div class="lev-check lev-danger">🚨 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong> 已突破修剪線 <strong>${trimLine.toFixed(2)}x</strong>！超標 +${diff.toFixed(2)}x<br>⚠️ <strong>需修剪回目標 ${targetToday.toFixed(2)}x</strong>（非修回 ${trimLine.toFixed(2)}x），應減持約 <strong>$${fmt(excessPos)}</strong> 部位，或用本月 DCA 資金自然稀釋。</div>`;
                             }
                         }
 
-                        if (lastEdited === 'equity') {
+                        if (!isDeviation) {
                             summaryDiv.innerHTML = `
                                 <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
                                     <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
@@ -198,6 +240,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         if (levCheck) {
                             instructionDiv.innerHTML += levCheck;
+                        }
+
+                        // DCA 新增資金試算
+                        const dcaVal = dcaInput ? parseFloat(dcaInput.value) : 0;
+                        if (!isNaN(dcaVal) && dcaVal > 0) {
+                            const dcaExposure = Math.round(dcaVal * targetToday);
+                            instructionDiv.innerHTML += `<div class="dca-hint" style="margin-top:10px; padding:8px 12px; background:rgba(59,130,246,0.1); border-left:3px solid #3b82f6; border-radius:4px; font-size:13px; color:#93c5fd;">💡【新資金單向投入法】新增資金 <strong>$${fmt(dcaVal)}</strong> 按當日目標槓桿 <strong>${targetToday.toFixed(2)}x</strong>，應加買 <strong>$${fmt(dcaExposure)}</strong> 曝險（絕對不補舊部位的自然衰減）。</div>`;
                         }
                     }
 
@@ -247,7 +296,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         <div class="ro-quick-checker">
                             <div class="ro-input-row">
-                                <label class="ro-input-label">⚡ 價差健檢</label>
+                                <label class="ro-input-label">⚡ 價差健檢 <span class="ro-nq-base" style="font-size:11px; color:#94a3b8; font-weight:normal;"></span></label>
                                 <div class="ro-input-wrapper">
                                     <input type="number" class="ro-spread-input" placeholder="${inputPlaceholder}" step="any">
                                     <span class="ro-input-unit">點</span>
@@ -285,6 +334,12 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                         });
                     } else {
+                        const nqBaseSpan = card.querySelector('.ro-nq-base');
+                        const getNqImplied = () => (window.latestQqqClose || 500) * 41.15;
+                        if (nqBaseSpan) {
+                            nqBaseSpan.textContent = `(基準點位: ~${Math.round(getNqImplied())} 點)`;
+                        }
+
                         input.addEventListener('input', () => {
                             const val = input.value.trim();
                             if (val === '') {
@@ -292,8 +347,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                 return;
                             }
                             const spread = parseFloat(val);
-                            // 預設以 20000 點基準換算 91 天年化
-                            const annRate = (spread / 20000) * (365 / 91) * 100;
+                            const nqImplied = getNqImplied();
+                            const annRate = (spread / nqImplied) * (365 / 91) * 100;
                             verdict.classList.remove('hidden');
 
                             if (annRate <= 0) {
