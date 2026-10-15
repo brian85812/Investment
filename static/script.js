@@ -128,12 +128,31 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const fmt = (n) => n.toLocaleString(undefined, {maximumFractionDigits:0});
 
+                    function renderDcaOnly(dcaVal) {
+                        const targetToday = market.target_today;
+                        const dcaExposure = Math.round(dcaVal * targetToday);
+                        resultBox.classList.remove('hidden');
+                        instructionDiv.className = 'action-instruction hold';
+                        summaryDiv.innerHTML = `
+                            <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                                <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
+                                <span>本月 DCA: <strong>$${fmt(dcaVal)}</strong></span>
+                                <span>建議建倉: <strong>$${fmt(dcaExposure)}</strong></span>
+                            </div>`;
+                        instructionDiv.innerHTML = `<div class="dca-hint" style="padding:8px 12px; background:rgba(59,130,246,0.1); border-left:3px solid #3b82f6; border-radius:4px; font-size:13px; color:#93c5fd;">💡【新資金單向投入法】新增資金 <strong>$${fmt(dcaVal)}</strong> 按當日目標槓桿 <strong>${targetToday.toFixed(2)}x</strong>，應加買 <strong>$${fmt(dcaExposure)}</strong> 曝險（絕對不補舊部位的自然衰減）。</div>`;
+                    }
+
                     // 輸入淨值 → 若無部位則自動反推，若已有部位則直接檢驗
                     equityInput.addEventListener('input', () => {
                         lastEdited = 'equity';
                         const equity = parseFloat(equityInput.value);
                         if (isNaN(equity) || equity <= 0) {
-                            resultBox.classList.add('hidden');
+                            const dcaVal = dcaInput ? parseFloat(dcaInput.value) : 0;
+                            if (!isNaN(dcaVal) && dcaVal > 0) {
+                                renderDcaOnly(dcaVal);
+                            } else {
+                                resultBox.classList.add('hidden');
+                            }
                             return;
                         }
                         const posVal = positionInput.value.trim();
@@ -158,7 +177,12 @@ document.addEventListener('DOMContentLoaded', () => {
                         lastEdited = 'position';
                         const position = parseFloat(positionInput.value);
                         if (isNaN(position) || position <= 0) {
-                            resultBox.classList.add('hidden');
+                            const dcaVal = dcaInput ? parseFloat(dcaInput.value) : 0;
+                            if (!isNaN(dcaVal) && dcaVal > 0) {
+                                renderDcaOnly(dcaVal);
+                            } else {
+                                resultBox.classList.add('hidden');
+                            }
                             return;
                         }
                         const eqVal = equityInput.value.trim();
@@ -178,10 +202,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     // 輸入本月新增資金 DCA
                     if (dcaInput) {
                         dcaInput.addEventListener('input', () => {
+                            const dcaVal = parseFloat(dcaInput.value);
                             const equity = parseFloat(equityInput.value);
                             const position = parseFloat(positionInput.value);
                             if (!isNaN(equity) && equity > 0 && !isNaN(position) && position > 0) {
                                 calculateAction(equity, position);
+                            } else if (!isNaN(dcaVal) && dcaVal > 0) {
+                                renderDcaOnly(dcaVal);
+                            } else {
+                                resultBox.classList.add('hidden');
                             }
                         });
                     }
