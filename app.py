@@ -247,34 +247,25 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         else:
             below_ma_counter = 0
 
-        # 修正 2：依各市場專屬 grace_days 判定破線（美股 >0 即當日砍，台股 >1 即連兩日砍）
+        # 1. 檢查是否觸發破線或死叉
         if sma_fast < sma_slow or below_ma_counter > grace_days:
             in_trend = False
             step_idx = 0
-            cur_b = base_leverage
-            is_deep = False
-            if deep_bear_guard and not pd.isna(sma_bear):
-                if sma_bear < sma_slow * deep_bear_guard.get('ratio', 0.97):
-                    cur_b = deep_bear_guard.get('deep_base', base_leverage)
-                    is_deep = True
-            target_history.append(cur_b)
-            deep_bear_history.append(is_deep)
-            ext_guard_active = False
-            bear_counter += 1
             accel_active = False
             accel_timer = 0
-            continue
 
-        # 修正 3：重啟多頭與牛初加速必須同時滿足「快線 >= 慢線」且「收盤價 >= 慢線」
-        if sma_fast >= sma_slow and current_close >= sma_slow and not in_trend:
+        # 2. 檢查是否滿足多頭重啟條件 (雙條件同時滿足)
+        elif sma_fast >= sma_slow and current_close >= sma_slow and not in_trend:
             in_trend = True
             if bull_acceleration and bull_acceleration.get('enable', True) and bear_counter >= bull_acceleration.get('min_bear_days', 40):
                 accel_active = True
                 accel_timer = 0
             bear_counter = 0
 
-        # 若仍在容忍期內 (below_ma_counter == 1) 但先前已是空頭 (not in_trend)，維持底倉防守
+        # 3. 若處於防禦狀態 (not in_trend)，統一判定是否觸發 C1 深熊底倉減半
         if not in_trend:
+            bear_counter += 1
+            ext_guard_active = False
             cur_b = base_leverage
             is_deep = False
             if deep_bear_guard and not pd.isna(sma_bear):
@@ -283,10 +274,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     is_deep = True
             target_history.append(cur_b)
             deep_bear_history.append(is_deep)
-            ext_guard_active = False
-            bear_counter += 1
             continue
 
+        # 4. 以下為 in_trend == True (多頭進攻狀態)，deep_bear 強制為 False
         cur_base = base_leverage
         if accel_active and bull_acceleration:
             accel_timer += 1
@@ -344,15 +334,15 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             bear_thresh = round(s_ma * bear_ratio, 2)
             if lev_changed and curr_target < prev_target:
                 explanation = (
-                    f"🚨【深熊降底倉 {prev_target}x → {curr_target}x】"
-                    f"中期 {bear_w}MA ({sma_bear_val}) 跌破年線 {slow_ma}MA * {bear_ratio} ({bear_thresh})，"
-                    f"確認進入極度深熊期！底倉自 {base_leverage}x 強制減半至 {curr_target}x 防守避險。"
+                    f"🚨【深熊二階段減碼 {prev_target}x → {curr_target}x】"
+                    f"收盤價持續破年線，且季線 {bear_w}MA ({sma_bear_val}) 跌破年線 {slow_ma}MA 逾 {round((1 - bear_ratio) * 100)}%（門檻 {bear_thresh}），"
+                    f"確認進入系統性深熊！底倉由 {prev_target}x 減半至 {curr_target}x 保命。"
                 )
             else:
                 explanation = (
-                    f"🛡️【深熊防禦 · 維持 {curr_target}x】"
-                    f"中期 {bear_w}MA ({sma_bear_val}) 持續低於年線 {slow_ma}MA * {bear_ratio} ({bear_thresh})，"
-                    f"處於深熊減半防護中（底倉減半至 {curr_target}x）。耐心等待均線修復重啟。"
+                    f"🛡️【深熊防禦狀態 · 維持 {curr_target}x】"
+                    f"季線 {bear_w}MA ({sma_bear_val}) 持續低於年線 {round(bear_ratio * 100)}%（{bear_thresh}），"
+                    f"維持二階段減半底倉 {curr_target}x 避險，靜待收盤站回年線 ({s_ma}) 重啟。"
                 )
         elif cur_p < s_ma:
             if lev_changed and curr_target < prev_target:

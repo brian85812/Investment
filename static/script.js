@@ -85,8 +85,29 @@ document.addEventListener('DOMContentLoaded', () => {
                     clone.querySelector('.target-lev').textContent = market.target_today.toFixed(2) + 'x';
                     clone.querySelector('.steps').textContent = `${market.step_idx} / ${market.max_steps}`;
 
+                    const trimTag = clone.querySelector('.trim-trigger-tag');
+                    if (trimTag && market.trim_trigger_lev) {
+                        trimTag.innerHTML = `修剪線: <strong style="color:#f59e0b;">${market.trim_trigger_lev.toFixed(2)}x</strong>`;
+                    }
+
                     clone.querySelector('.fast-ma').innerHTML = `${market.fast_ma_len}MA: <span>${market.sma_fast_val.toFixed(2)}</span>`;
                     clone.querySelector('.slow-ma').innerHTML = `${market.slow_ma_len}MA: <span>${market.sma_slow_val.toFixed(2)}</span>`;
+
+                    const bearMaElem = clone.querySelector('.bear-ma');
+                    if (bearMaElem && market.sma_bear_val) {
+                        const bearThresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(2);
+                        bearMaElem.innerHTML = `60MA: <span>${market.sma_bear_val.toFixed(2)}</span> <span style="font-size:11px; color:#ef4444; margin-left:3px;">(深熊門檻: ${bearThresh})</span>`;
+                    } else if (bearMaElem) {
+                        bearMaElem.style.display = 'none';
+                    }
+
+                    const trimBadge = clone.querySelector('.trim-badge');
+                    if (trimBadge && market.trim_trigger_lev) {
+                        trimBadge.innerHTML = `修剪警戒: <span style="color:#f59e0b;">>${market.trim_trigger_lev.toFixed(2)}x</span>`;
+                    } else if (trimBadge) {
+                        trimBadge.style.display = 'none';
+                    }
+
                     clone.querySelector('.strategy-explanation').textContent = market.explanation;
 
                     const equityInput = clone.querySelector('.equity-input');
