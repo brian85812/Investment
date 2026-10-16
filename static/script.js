@@ -101,8 +101,27 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
 
                     // 2x2 技術防線矩陣
-                    clone.querySelector('.high-bw-val').textContent = `> ${market.high_bw.toFixed(2)}`;
-                    clone.querySelector('.low-bw-val').textContent = `< ${market.low_bw.toFixed(2)}`;
+                    const highBwElem = clone.querySelector('.high-bw-val');
+                    if (!market.in_trend) {
+                        highBwElem.textContent = `站上年線 > ${market.sma_slow_val.toFixed(2)}`;
+                        highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
+                    } else if (market.ext_guard_active) {
+                        highBwElem.textContent = `🌡️ 過熱封頂 2.0x (>${market.high_bw.toFixed(1)})`;
+                        highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
+                    } else if (market.step_idx >= market.max_steps) {
+                        highBwElem.textContent = `🔒 已達 ${market.max_leverage.toFixed(1)}x 滿載上限`;
+                        highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
+                    } else {
+                        highBwElem.textContent = `> ${market.high_bw.toFixed(2)}`;
+                    }
+
+                    const lowBwElem = clone.querySelector('.low-bw-val');
+                    if (!market.in_trend || market.step_idx === 0) {
+                        lowBwElem.textContent = `🛡️ 已處底倉 (守年線 ${market.sma_slow_val.toFixed(1)})`;
+                    } else {
+                        lowBwElem.textContent = `< ${market.low_bw.toFixed(2)}`;
+                    }
+
                     clone.querySelector('.fast-slow-ma').textContent = `${market.sma_fast_val.toFixed(1)} / ${market.sma_slow_val.toFixed(1)}`;
                     const c1Thresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(1);
                     clone.querySelector('.bear-c1-ma').textContent = market.sma_bear_val

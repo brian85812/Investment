@@ -36,10 +36,22 @@ def send_push_notification(signals, rollover):
             if s['target_today'] != s['target_yesterday']
             else f"維持 <b>{s['target_today']:.2f}x</b>"
         )
+        if not s['in_trend']:
+            add_str = f"<code>站上年線&gt;{s['sma_slow_val']:.2f}</code>"
+            sub_str = "<code>已處底倉</code>"
+        else:
+            if s.get('ext_guard_active', False):
+                add_str = "<code>過熱封頂2.0x</code>"
+            elif s['step_idx'] >= s['max_steps']:
+                add_str = "<code>已滿載鎖定</code>"
+            else:
+                add_str = f"<code>&gt;{s['high_bw']:.2f}</code>"
+            sub_str = "<code>已處底倉</code>" if s['step_idx'] == 0 else f"<code>&lt;{s['low_bw']:.2f}</code>"
+
         lines.append(
             f"• <b>{s['name']}</b> ({s['date']})｜收盤 <code>{s['close']:.2f}</code>\n"
-            f"  目標: {chg} (階梯 {s['step_idx']}/{s['max_steps']} · 修剪線 >{s['trim_trigger_lev']:.2f}x)\n"
-            f"  加碼 <code>>{s['high_bw']:.2f}</code> ｜ 減碼 <code><{s['low_bw']:.2f}</code> ｜ 220MA <code>{s['sma_slow_val']:.2f}</code>"
+            f"  目標: {chg} (階梯 {s['step_idx']}/{s['max_steps']} · 修剪線 &gt;{s['trim_trigger_lev']:.2f}x)\n"
+            f"  加碼 {add_str} ｜ 減碼 {sub_str} ｜ 220MA <code>{s['sma_slow_val']:.2f}</code>"
         )
     for k in ('tw', 'us'):
         ro = rollover.get(k, {})

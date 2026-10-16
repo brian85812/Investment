@@ -262,14 +262,14 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 accel_timer = 0
             bear_counter = 0
 
-        # 3. 若處於防禦狀態 (not in_trend)，統一判定是否觸發 C1 深熊底倉減半
+        # 3. 若處於防禦狀態 (not in_trend)，統一判定是否觸發 C1 深熊底倉減半 (含 C1-A2 季線復原機制)
         if not in_trend:
             bear_counter += 1
             ext_guard_active = False
             cur_b = base_leverage
             is_deep = False
             if deep_bear_guard and not pd.isna(sma_bear):
-                if sma_bear < sma_slow * deep_bear_guard.get('ratio', 0.97):
+                if sma_bear < sma_slow * deep_bear_guard.get('ratio', 0.97) and sma_fast < sma_bear:
                     cur_b = deep_bear_guard.get('deep_base', base_leverage)
                     is_deep = True
             target_history.append(cur_b)
@@ -326,95 +326,131 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     lev_changed = curr_target != prev_target
     deep_bear_active = deep_bear_history[-1] if deep_bear_history else False
 
-    # 修正 4：精準對應狀態機之說明文案（含深熊減半、台股 1-Day Grace Period 首日觀察提示）
+    # === 全新重構：11 種實戰狀態 (Cases) 專屬戰術說明文案 ===
+    bear_ratio = deep_bear_guard.get('ratio', 0.97) if deep_bear_guard else 0.97
+    bear_w = deep_bear_guard.get('bear_ma', 60) if deep_bear_guard else 60
+    bear_thresh = round(s_ma * bear_ratio, 2)
+    ext_ratio_now = round(cur_p / s_ma, 4) if s_ma > 0 else 0.0
+    ext_pct_now = round((cur_p / s_ma - 1) * 100, 1) if s_ma > 0 else 0.0
+
     if not in_trend:
+        # 【空頭防禦大類：共 5 個 Cases】
         if deep_bear_active and deep_bear_guard:
-            bear_ratio = deep_bear_guard.get('ratio', 0.97)
-            bear_w = deep_bear_guard.get('bear_ma', 60)
-            bear_thresh = round(s_ma * bear_ratio, 2)
             if lev_changed and curr_target < prev_target:
+                # Case 1: 剛觸發 C1 深熊二階段減半當日
                 explanation = (
-                    f"🚨【深熊二階段減碼 {prev_target}x → {curr_target}x】"
-                    f"收盤價持續破年線，且季線 {bear_w}MA ({sma_bear_val}) 跌破年線 {slow_ma}MA 逾 {round((1 - bear_ratio) * 100)}%（門檻 {bear_thresh}），"
-                    f"確認進入系統性深熊！底倉由 {prev_target}x 減半至 {curr_target}x 保命。"
+                    f"🚨【深熊二階段減碼 · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
+                    f"季線 {bear_w}MA ({sma_bear_val}) 已跌破年線 97% 深熊門檻 ({bear_thresh}) 且快線位於季線之下，"
+                    f"確認進入系統性空頭深水區！今日請掛限價單將底倉減半至 {curr_target:.2f}x 保命。"
                 )
             else:
+                # Case 2: 維持 C1 深熊減半期間
                 explanation = (
-                    f"🛡️【深熊防禦狀態 · 維持 {curr_target}x】"
-                    f"季線 {bear_w}MA ({sma_bear_val}) 持續低於年線 {round(bear_ratio * 100)}%（{bear_thresh}），"
-                    f"維持二階段減半底倉 {curr_target}x 避險，靜待收盤站回年線 ({s_ma}) 重啟。"
+                    f"🛡️【深熊減半防禦中 · 維持 {curr_target:.2f}x】"
+                    f"中期與長期均線持續空頭排列，維持二階段減半底倉 {curr_target:.2f}x 避險。"
+                    f"無須動作；待快線 ({f_ma}) 重新站上季線 ({sma_bear_val}) 即刻復原常態底倉 {base_leverage:.1f}x。"
                 )
+        elif lev_changed and curr_target > prev_target:
+            # Case 3: C1-A2 季線復原觸發當日 (快線站上 60MA，底倉由 0.4x/0.5x 恢復至 0.8x/1.0x)
+            explanation = (
+                f"🌤️【深熊底部復原 · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
+                f"短線 {fast_ma}MA ({f_ma}) 已成功站上季線 {bear_w}MA ({sma_bear_val})，空頭最劇烈尋底期結束！"
+                f"今日請掛限價單將底倉由深熊半倉恢復至常態 {curr_target:.2f}x，銜接年線反攻。"
+            )
         elif cur_p < s_ma:
             if lev_changed and curr_target < prev_target:
+                # Case 4: 跌破 220MA 確認退回常態底倉當日
                 explanation = (
-                    f"🚨【防禦降槓 {prev_target}x → {curr_target}x】"
-                    f"收盤價 ({cur_p}) 確認跌破年線 {slow_ma}MA ({s_ma})，"
-                    f"觸發護城河最高防線！動能階梯強制歸零，"
-                    f"急降至底倉 {curr_target}x。嚴禁手動加碼，等待重啟訊號。"
+                    f"🚨【破年線防禦降槓 · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
+                    f"收盤價 ({cur_p}) 確認跌破 {slow_ma}MA 年線護城河 ({s_ma})，動能階梯強制歸零！"
+                    f"今日請於最佳時段掛限價單退回常態底倉 {curr_target:.2f}x，嚴禁盤中手動抄底。"
+                )
+            else:
+                # Case 5: 常態年線下防禦維持期間
+                explanation = (
+                    f"🛡️【年線下防禦待命 · 維持 {curr_target:.2f}x】"
+                    f"收盤價距離 {slow_ma}MA 年線尚差 {round(s_ma - cur_p, 2)} 點（目前季線 {sma_bear_val} 仍高於深熊線 {bear_thresh}）。"
+                    f"今日無須動作，維持常態底倉 {curr_target:.2f}x 靜待均線修復。"
+                )
+        else:
+            # Case 6: 收盤已站上年線，但快線尚未黃金交叉慢線
+            explanation = (
+                f"👀【右側重啟觀察期 · 維持 {curr_target:.2f}x】"
+                f"收盤價 ({cur_p}) 已率先站回年線 ({s_ma}) 之上，惟 {fast_ma}MA 快線 ({f_ma}) 尚差 {round(s_ma - f_ma, 2)} 點完成黃金交叉。"
+                f"今日維持底倉 {curr_target:.2f}x 按兵不動，待雙條件同時滿足即刻重啟多頭。"
+            )
+    else:
+        # 【多頭進攻大類：共 5 個 Cases】
+        if cur_p < s_ma and below_ma_counter <= grace_days:
+            # Case 7: 台股專屬 1-Day Grace Period 首日破年線觀察
+            explanation = (
+                f"⚠️【破年線容忍觀察 (第 1/{grace_days} 日) · 暫維 {curr_target:.2f}x】"
+                f"收盤價 ({cur_p}) 首日微幅跌破年線 ({s_ma})，啟動台股防洗盤容忍保護，今日暫不砍倉！"
+                f"明日收盤若未能站回 {s_ma} 之上，將正式確認破線並退回 {base_leverage:.1f}x 底倉。"
+            )
+        elif step_idx == 0:
+            # Case 8: 剛站上年線多頭確立，處於 Step 0 底倉等待第一次突破
+            diff_h = round(max(h_bw - cur_p, 0.01), 2)
+            explanation = (
+                f"🚀【多頭起跑待命 (Step 0/{max_idx}) · 目標 {curr_target:.2f}x】"
+                f"年線護城河與快線多頭排列已確立！目前持守底倉 {curr_target:.2f}x，"
+                f"距離第一階右側突破加碼門檻 ({h_bw}) 僅差 {diff_h} 點，突破前不提前追高。"
+            )
+        elif lev_changed and curr_target > prev_target:
+            # Case 9: 突破 N 日高點（或脫離過熱區）觸發升檔加碼當日
+            if step_idx == max_idx:
+                explanation = (
+                    f"🔥【突破滿載加碼 (Step {step_idx}/{max_idx}) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
+                    f"收盤價 ({cur_p}) 創近 {breakout_window} 日收盤新高！動能階梯推進至最高滿載檔位。"
+                    f"今日請掛限價單加碼至 {curr_target:.2f}x 天花板；後續不再加買，僅盯下檔減碼線 ({l_bw}) 與修剪線 ({trim_trigger:.2f}x)。"
                 )
             else:
                 explanation = (
-                    f"🛡️【防禦狀態 · 維持 {curr_target}x】"
-                    f"收盤價 ({cur_p}) 持續低於年線 {slow_ma}MA ({s_ma})，"
-                    f"維持最低底倉 {curr_target}x 防守避險。"
-                    f"距離年線還有 {round(s_ma - cur_p, 2)} 點，耐心等待均線修復。"
+                    f"📈【順勢突破加碼 (Step {step_idx}/{max_idx}) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
+                    f"收盤價 ({cur_p}) 成功突破近 {breakout_window} 日高點 ({h_bw})，趨勢動能確認！"
+                    f"今日請於最佳時段掛限價單將部位推升至 {curr_target:.2f}x（冷卻期 {cooldown} 日後始可再升檔）。"
+                )
+        elif lev_changed and curr_target < prev_target:
+            # Case 10: 跌破 N 日低點（或觸發過熱冷卻器壓回 2.0x）觸發降檔減碼當日
+            if ext_guard_active and extension_guard:
+                explanation = (
+                    f"🌡️【乖離過熱鎖利減碼 · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
+                    f"年線正乖離達 +{ext_pct_now}%（超過 +16% 警戒線），啟動美股過熱保護閥！"
+                    f"今日請掛限價單將槓桿上限主動壓回 {curr_target:.2f}x 鎖住高檔獲利，待乖離回落 ≤16% 再恢復 3.0x 權限。"
+                )
+            else:
+                explanation = (
+                    f"📉【跌破通道減碼 (Step {step_idx}/{max_idx}) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
+                    f"收盤價 ({cur_p}) 跌破近 {breakout_window} 日低點支撐 ({l_bw})，短線動能轉弱。"
+                    f"若你目前帳戶實際槓桿高於 {curr_target:.2f}x，今日請掛限價單減碼壓回 {curr_target:.2f}x 目標。"
                 )
         else:
-            explanation = (
-                f"👀【觀察狀態 · 維持 {curr_target}x】"
-                f"收盤價 ({cur_p}) 雖在年線 {slow_ma}MA ({s_ma}) 之上，"
-                f"但短線 {fast_ma}MA ({f_ma}) 尚未黃金交叉，維持底倉 {curr_target}x 待命。"
-            )
-    else:
-        if cur_p < s_ma and below_ma_counter <= grace_days:
-            explanation = (
-                f"⚠️【破線容忍觀察期 (第 {below_ma_counter}/{grace_days} 天) · 暫維 {curr_target}x】"
-                f"收盤價 ({cur_p}) 首日跌破年線 {slow_ma}MA ({s_ma})，啟動台股 1-Day Grace Period 防洗盤保護！"
-                f"若明日收盤未能站回年線之上，將正式確認破線並強制退回底倉 {base_leverage}x。"
-            )
-        elif step_idx == 0:
-            diff_h = round(h_bw - cur_p, 2)
-            explanation = (
-                f"🚀【多頭待命 · 維持 {curr_target}x】"
-                f"雙均線多頭確立 ({fast_ma}MA {f_ma} >= {slow_ma}MA {s_ma})，"
-                f"距第一階加碼門檻（收盤突破近 {breakout_window} 日最高收盤 {h_bw}）差 {max(diff_h, 0.01)} 點。"
-            )
-        elif lev_changed and curr_target > prev_target:
-            explanation = (
-                f"📈【突破加碼 {prev_target}x → {curr_target}x】"
-                f"收盤價 ({cur_p}) 突破近 {breakout_window} 日最高收盤 ({h_bw})！"
-                f"動能階梯升至 {step_idx}/{max_idx}，槓桿升至 {curr_target}x（修剪警戒線 {trim_trigger}x）。"
-            )
-        elif lev_changed and curr_target < prev_target:
-            explanation = (
-                f"📉【跌破減碼 {prev_target}x → {curr_target}x】"
-                f"收盤價 ({cur_p}) 跌破近 {breakout_window} 日最低收盤 ({l_bw})！"
-                f"動能階梯降至 {step_idx}/{max_idx}，若實際槓桿 > {curr_target}x 須賣出壓回目標。"
-            )
-        else:
-            explanation = (
-                f"⚡【多頭進攻 · 維持 {curr_target}x】"
-                f"動能階梯 {step_idx}/{max_idx}，槓桿維持 {curr_target}x。"
-                f"加碼門檻: >{h_bw}，減碼門檻: <{l_bw}，超標修剪線: >{trim_trigger}x（突破直砍回 {curr_target}x）。"
-            )
+            # Case 11: 多頭進攻維持期間（細分為：滿倉 3.0x vs 過熱封頂 2.0x vs 中段爬坡中）
+            if ext_guard_active and extension_guard:
+                explanation = (
+                    f"🌡️【多頭過熱冷卻中 (Step {step_idx}/{max_idx}) · 封頂維持 {curr_target:.2f}x】"
+                    f"目前年線正乖離 +{ext_pct_now}%（>16%），加碼上限鎖死於 {curr_target:.2f}x。"
+                    f"今日完全不動作；待股價橫盤或年線跟上使乖離 ≤16% 後，自動解鎖 3.0x 滿載空間。"
+                )
+            elif step_idx == max_idx:
+                explanation = (
+                    f"👑【滿載巡航奔跑中 (Step {step_idx}/{max_idx}) · 維持上限 {curr_target:.2f}x】"
+                    f"已達系統最高槓桿天花板，上方無更高加碼檔位！上漲過程讓槓桿自然衰減、利潤奔跑，絕對不追高補倉；"
+                    f"日常僅需防守下檔減碼線 (<{l_bw}) 與被動超標修剪線 (>{trim_trigger:.2f}x)。"
+                )
+            else:
+                diff_h = round(max(h_bw - cur_p, 0.01), 2)
+                explanation = (
+                    f"⚡【多頭順勢巡航 (Step {step_idx}/{max_idx}) · 維持 {curr_target:.2f}x】"
+                    f"趨勢穩健推進中，今日目標槓桿不變，無須任何操作。"
+                    f"距下一階突破加碼門檻 (>{h_bw}) 差 {diff_h} 點，下檔減碼防線設於 <{l_bw}。"
+                )
 
-    # === 乖離過熱冷卻器附加說明 ===
-    ext_ratio_now = round(cur_p / s_ma, 4) if s_ma > 0 else 0
-    if ext_guard_active and extension_guard:
-        explanation += (
-            f" 🌡️【乖離過熱冷卻中】年線乖離率 {round(ext_ratio_now * 100 - 100, 1)}%"
-            f"（>{round((extension_guard['threshold'] - 1) * 100)}%），"
-            f"加碼上限壓制在 {extension_guard['cap']}x，"
-            f"待乖離收斂後恢復滿載權限。"
-        )
-
-    # === 牛初加速附加說明 ===
+    # === 附加狀態尾註（僅在牛初加速啟動時補充） ===
     bull_accel_active = accel_active if bull_acceleration else False
     bull_accel_days_left = max(0, bull_acceleration.get('accel_days', 252) - accel_timer) if (bull_acceleration and accel_active) else 0
     if bull_accel_active:
-        explanation += (
-            f" 🚀【牛初加速中】底倉暫時調升至 {cur_base}x（剩餘 {bull_accel_days_left} 天），享受估值修復暴利。"
-        )
+        explanation += f" 🚀【台股牛初加速生效中：底倉基準升為 {cur_base:.1f}x，剩餘 {bull_accel_days_left} 交易日】"
 
     # === 組合回傳資料 ===
     return {
