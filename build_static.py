@@ -18,7 +18,7 @@ def send_push_notification(signals, rollover):
     bot_token = os.environ.get("TG_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TG_CHAT_ID", "").strip()
     if not bot_token or not chat_id:
-        print("ℹ️ 未偵測到 TG_BOT_TOKEN / TG_CHAT_ID，略過 Telegram 推播。")
+        print(f"ℹ️ 未偵測到完整 TG 設定 (TG_BOT_TOKEN: {'已設定' if bot_token else '未設定'}, TG_CHAT_ID: {'已設定' if chat_id else '未設定'})，略過 Telegram 推播。")
         return
 
     urgent = any(
@@ -62,16 +62,20 @@ def send_push_notification(signals, rollover):
         "chat_id": chat_id,
         "text": "\n".join(lines),
         "parse_mode": "HTML",
-        "disable_notification": (not urgent)
+        "disable_notification": False
     }).encode("utf-8")
 
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
-        print("✅ Telegram 戰情推播發送成功！")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp_data = resp.read().decode('utf-8')
+            print(f"✅ Telegram 戰情推播發送成功！API 回應: {resp_data[:80]}...")
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode('utf-8', errors='ignore')
+        print(f"❌ Telegram 推播 HTTP 錯誤 [{e.code}]: {err_msg}")
     except Exception as e:
-        print(f"⚠️ Telegram 推播發送失敗: {e}")
+        print(f"❌ Telegram 推播發送失敗: {e}")
 
 def build():
     print("🚀 開始建置靜態網站 (GitHub Pages)...")
