@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import shutil
+import urllib.request
 from datetime import datetime
 
 # 確保輸出支援 UTF-8
@@ -12,6 +13,53 @@ if hasattr(sys.stdout, 'reconfigure'):
         pass
 
 from app import compute_signal, compute_rollover_radar
+
+def send_push_notification(signals, rollover):
+    bot_token = os.environ.get("TG_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TG_CHAT_ID", "").strip()
+    if not bot_token or not chat_id:
+        print("ℹ️ 未偵測到 TG_BOT_TOKEN / TG_CHAT_ID，略過 Telegram 推播。")
+        return
+
+    urgent = any(
+        (s['target_today'] != s['target_yesterday']) or s.get('deep_bear_active', False)
+        for s in signals
+    ) or any(
+        rollover.get(k, {}).get('days_left', 99) <= 2 for k in ('tw', 'us')
+    )
+
+    header = "🚨 <b>【護城河調倉指令警報】</b>" if urgent else "🟢 <b>【護城河 EOD 戰情 · 今日維持】</b>"
+    lines = [header, ""]
+    for s in signals:
+        chg = (
+            f"⚡ <b>{s['target_yesterday']:.2f}x ➔ {s['target_today']:.2f}x</b>"
+            if s['target_today'] != s['target_yesterday']
+            else f"維持 <b>{s['target_today']:.2f}x</b>"
+        )
+        lines.append(
+            f"• <b>{s['name']}</b> ({s['date']})｜收盤 <code>{s['close']:.2f}</code>\n"
+            f"  目標: {chg} (階梯 {s['step_idx']}/{s['max_steps']} · 修剪線 >{s['trim_trigger_lev']:.2f}x)\n"
+            f"  加碼 <code>>{s['high_bw']:.2f}</code> ｜ 減碼 <code><{s['low_bw']:.2f}</code> ｜ 220MA <code>{s['sma_slow_val']:.2f}</code>"
+        )
+    for k in ('tw', 'us'):
+        ro = rollover.get(k, {})
+        if ro and ro.get('days_left', 99) <= 5:
+            lines.append(f"\n🎯 <b>轉倉提醒</b>：{ro['market']} 結算倒數 <b>{ro['days_left']} 天</b> ({ro['badge']})")
+
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "text": "\n".join(lines),
+        "parse_mode": "HTML",
+        "disable_notification": (not urgent)
+    }).encode("utf-8")
+
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+        print("✅ Telegram 戰情推播發送成功！")
+    except Exception as e:
+        print(f"⚠️ Telegram 推播發送失敗: {e}")
 
 def build():
     print("🚀 開始建置靜態網站 (GitHub Pages)...")
@@ -84,6 +132,9 @@ def build():
     with open(nojekyll_path, "w") as f:
         pass
     print("✅ 已建立 .nojekyll")
+
+    # 7. 發送推播通知
+    send_push_notification(signals, rollover)
 
     print(f"\n🎉 靜態建置完成！輸出目錄: {dist_dir}")
     print(f"🕒 建置時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

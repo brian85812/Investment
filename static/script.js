@@ -1,290 +1,265 @@
 document.addEventListener('DOMContentLoaded', () => {
     const dashboard = document.getElementById('dashboard');
     const template = document.getElementById('market-card-template');
+    const globalActionPill = document.getElementById('global-action-pill');
+    const dataDateTag = document.getElementById('data-date-tag');
 
-    // 自動判斷執行環境：在 GitHub Pages 上讀取靜態 JSON，在本地 Flask 上讀取 /api 端點
     const isStatic = window.location.hostname.includes('github.io') || window.location.protocol === 'file:';
     const DATA_API_URL = isStatic ? './api_data.json' : '/api/data';
     const ROLLOVER_API_URL = isStatic ? './api_rollover.json' : '/api/rollover';
 
+    const fmt = (n) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+
     function fetchData(retryCount = 0) {
         fetch(DATA_API_URL + '?t=' + new Date().getTime())
-            .then(response => {
-                if (response.status === 202) {
-                    // 伺服器正在預熱快取，30 秒後自動重試
-                    return response.json().then(body => {
-                        const msg = body.message || '資料載入中...';
-                        const remaining = 30 - retryCount * 5;
-                        dashboard.innerHTML = `
-                            <div style="text-align:center; color:#94a3b8; padding:40px;">
-                                <div style="font-size:2rem; margin-bottom:16px;">⏳</div>
-                                <div style="font-size:1.1rem; margin-bottom:8px;">${msg}</div>
-                                <div style="font-size:0.85rem; color:#64748b;">約 ${Math.max(remaining,5)} 秒後自動重試... (第 ${retryCount+1} 次)</div>
-                            </div>`;
-                        setTimeout(() => fetchData(retryCount + 1), 5000);
-                        return null;
-                    });
+            .then(res => {
+                if (res.status === 202) {
+                    setTimeout(() => fetchData(retryCount + 1), 5000);
+                    return null;
                 }
-                return response.json();
+                return res.json();
             })
             .then(data => {
-                if (!data) return; // 202 狀態，等重試
-
+                if (!data) return;
                 dashboard.innerHTML = '';
                 dashboard.classList.remove('loading-state');
 
+                let anyLevChanged = false;
+                let latestDate = '';
+
                 data.forEach(market => {
-                    if(!market) return;
+                    if (!market) return;
+                    if (market.date) latestDate = market.date;
+                    if (market.target_today !== market.target_yesterday) anyLevChanged = true;
+
                     if (market.ticker === 'QQQ' && market.close) {
                         window.latestQqqClose = market.close;
                         const nqBaseSpan = document.querySelector('.ro-nq-base');
                         if (nqBaseSpan) {
-                            nqBaseSpan.textContent = `(基準點位: ~${Math.round(market.close * 41.15)} 點)`;
+                            nqBaseSpan.textContent = `(~${Math.round(market.close * 41.15)}點)`;
                         }
                     }
 
                     const clone = template.content.cloneNode(true);
+                    const storageKey = `moat_calc_${market.id}`;
 
+                    // 標題與狀態標籤
                     clone.querySelector('.market-name').textContent = market.name;
+                    clone.querySelector('.ticker-code').textContent = market.ticker;
 
                     const badge = clone.querySelector('.status-badge');
                     if (market.in_trend) {
-                        badge.textContent = '🟢 牛市';
+                        badge.textContent = '🟢 220MA 多頭安全區';
                         badge.classList.add('bull');
                     } else {
-                        badge.textContent = '🔴 防禦中';
+                        badge.textContent = '🔴 破年線防禦區';
                         badge.classList.add('bear');
                     }
 
-                    // 乖離過熱冷卻器 badge (美股專屬)
+                    // 附加狀態標籤
+                    const extBadge = clone.querySelector('.ext-badge');
                     if (market.ext_guard_active) {
-                        const extBadge = document.createElement('span');
-                        extBadge.className = 'status-badge ext-guard';
-                        extBadge.textContent = `🌡️ 過熱冷卻中 (乖離 ${((market.ext_ratio - 1) * 100).toFixed(1)}%)`;
-                        extBadge.style.cssText = 'background:#ff6b35;color:#fff;font-size:0.75rem;padding:2px 8px;border-radius:4px;margin-left:6px;';
-                        badge.parentNode.insertBefore(extBadge, badge.nextSibling);
-                    } else if (market.ext_ratio && market.ext_ratio > 1.0 && market.ticker === 'QQQ') {
-                        const extInfo = document.createElement('span');
-                        extInfo.style.cssText = 'font-size:0.7rem;color:#888;margin-left:6px;';
-                        extInfo.textContent = `乖離 ${((market.ext_ratio - 1) * 100).toFixed(1)}%`;
-                        badge.parentNode.insertBefore(extInfo, badge.nextSibling);
+                        extBadge.textContent = `🌡️ 乖離過熱鎖 2.0x`;
+                        extBadge.classList.remove('hidden');
                     }
-
-                    // 牛初加速 badge (台股專屬)
+                    const accelBadge = clone.querySelector('.accel-badge');
                     if (market.bull_accel_active) {
-                        const accelBadge = document.createElement('span');
-                        accelBadge.className = 'status-badge bull-accel';
-                        accelBadge.textContent = `🚀 牛初加速中 (${market.bull_accel_days_left}天)`;
-                        accelBadge.style.cssText = 'background:#8b5cf6;color:#fff;font-size:0.75rem;padding:2px 8px;border-radius:4px;margin-left:6px;';
-                        badge.parentNode.insertBefore(accelBadge, badge.nextSibling);
+                        accelBadge.textContent = `🚀 牛初加速 1.2x (餘 ${market.bull_accel_days_left}d)`;
+                        accelBadge.classList.remove('hidden');
                     }
-
-                    // 深熊二階段減半 badge (C1 防禦)
+                    const deepBadge = clone.querySelector('.deep-badge');
                     if (market.deep_bear_active) {
-                        const deepBadge = document.createElement('span');
-                        deepBadge.className = 'status-badge deep-bear';
-                        deepBadge.textContent = `🚨 深熊減半 (${market.target_today.toFixed(1)}x)`;
-                        deepBadge.style.cssText = 'background:#dc2626;color:#fff;font-size:0.75rem;padding:2px 8px;border-radius:4px;margin-left:6px;';
-                        badge.parentNode.insertBefore(deepBadge, badge.nextSibling);
+                        deepBadge.textContent = `🚨 C1 深熊減半 (${market.target_today.toFixed(1)}x)`;
+                        deepBadge.classList.remove('hidden');
                     }
 
+                    // 今日動作對比
+                    const deltaBadge = clone.querySelector('.delta-badge');
+                    if (market.target_today !== market.target_yesterday) {
+                        deltaBadge.textContent = `⚡ 調倉 ${market.target_yesterday.toFixed(2)}x ➔ ${market.target_today.toFixed(2)}x`;
+                        deltaBadge.classList.add('change');
+                    } else {
+                        deltaBadge.textContent = `維持 ${market.target_today.toFixed(2)}x`;
+                        deltaBadge.classList.add('hold');
+                    }
+
+                    // 三大核心數據
                     clone.querySelector('.price').textContent = market.close.toFixed(2);
-                    clone.querySelector('.target-lev').textContent = market.target_today.toFixed(2) + 'x';
+                    const biasPct = ((market.close / market.sma_slow_val - 1) * 100).toFixed(1);
+                    clone.querySelector('.ma-dist-text').textContent = `年線乖離 ${biasPct >= 0 ? '+' : ''}${biasPct}%`;
+
+                    clone.querySelector('.target-lev').textContent = `${market.target_today.toFixed(2)}x`;
+                    const trimLine = market.trim_trigger_lev || (market.target_today + 0.15);
+                    clone.querySelector('.prev-and-trim').innerHTML = `修剪警戒 <strong style="color:#f59e0b;">>${trimLine.toFixed(2)}x</strong>`;
+
                     clone.querySelector('.steps').textContent = `${market.step_idx} / ${market.max_steps}`;
-
-                    const trimTag = clone.querySelector('.trim-trigger-tag');
-                    if (trimTag && market.trim_trigger_lev) {
-                        trimTag.innerHTML = `修剪線: <strong style="color:#f59e0b;">${market.trim_trigger_lev.toFixed(2)}x</strong>`;
+                    const track = clone.querySelector('.step-bar-track');
+                    for (let s = 1; s <= market.max_steps; s++) {
+                        const seg = document.createElement('div');
+                        seg.className = 'step-seg' + (s <= market.step_idx ? ' active' : '');
+                        track.appendChild(seg);
                     }
 
-                    clone.querySelector('.fast-ma').innerHTML = `${market.fast_ma_len}MA: <span>${market.sma_fast_val.toFixed(2)}</span>`;
-                    clone.querySelector('.slow-ma').innerHTML = `${market.slow_ma_len}MA: <span>${market.sma_slow_val.toFixed(2)}</span>`;
-
-                    const bearMaElem = clone.querySelector('.bear-ma');
-                    if (bearMaElem && market.sma_bear_val) {
-                        const bearThresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(2);
-                        bearMaElem.innerHTML = `60MA: <span>${market.sma_bear_val.toFixed(2)}</span> <span style="font-size:11px; color:#ef4444; margin-left:3px;">(深熊門檻: ${bearThresh})</span>`;
-                    } else if (bearMaElem) {
-                        bearMaElem.style.display = 'none';
-                    }
-
-                    const trimBadge = clone.querySelector('.trim-badge');
-                    if (trimBadge && market.trim_trigger_lev) {
-                        trimBadge.innerHTML = `修剪警戒: <span style="color:#f59e0b;">>${market.trim_trigger_lev.toFixed(2)}x</span>`;
-                    } else if (trimBadge) {
-                        trimBadge.style.display = 'none';
-                    }
+                    // 2x2 技術防線矩陣
+                    clone.querySelector('.high-bw-val').textContent = `> ${market.high_bw.toFixed(2)}`;
+                    clone.querySelector('.low-bw-val').textContent = `< ${market.low_bw.toFixed(2)}`;
+                    clone.querySelector('.fast-slow-ma').textContent = `${market.sma_fast_val.toFixed(1)} / ${market.sma_slow_val.toFixed(1)}`;
+                    const c1Thresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(1);
+                    clone.querySelector('.bear-c1-ma').textContent = market.sma_bear_val
+                        ? `${market.sma_bear_val.toFixed(1)} / ${c1Thresh}`
+                        : '--';
 
                     clone.querySelector('.strategy-explanation').textContent = market.explanation;
 
+                    // 實戰部位與 DCA 試算器 (含 localStorage 自動記憶)
                     const equityInput = clone.querySelector('.equity-input');
                     const positionInput = clone.querySelector('.position-input');
                     const dcaInput = clone.querySelector('.dca-input');
                     const resultBox = clone.querySelector('.action-result');
                     const summaryDiv = clone.querySelector('.calc-summary');
                     const instructionDiv = clone.querySelector('.action-instruction');
+                    const savedPill = clone.querySelector('.saved-lev-pill');
+                    const calcDrawer = clone.querySelector('.calc-drawer');
 
-                    let lastEdited = null; // 'equity' or 'position'
+                    let lastEdited = null;
 
-                    const fmt = (n) => n.toLocaleString(undefined, {maximumFractionDigits:0});
+                    function saveState() {
+                        try {
+                            localStorage.setItem(storageKey, JSON.stringify({
+                                equity: equityInput.value,
+                                position: positionInput.value
+                            }));
+                        } catch (e) {}
+                    }
 
                     function renderDcaOnly(dcaVal) {
                         const targetToday = market.target_today;
                         const dcaExposure = Math.round(dcaVal * targetToday);
                         resultBox.classList.remove('hidden');
-                        instructionDiv.className = 'action-instruction hold';
-                        summaryDiv.innerHTML = `
-                            <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-                                <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
-                                <span>本月 DCA: <strong>$${fmt(dcaVal)}</strong></span>
-                                <span>建議建倉: <strong>$${fmt(dcaExposure)}</strong></span>
-                            </div>`;
-                        instructionDiv.innerHTML = `<div class="dca-hint" style="padding:8px 12px; background:rgba(59,130,246,0.1); border-left:3px solid #3b82f6; border-radius:4px; font-size:13px; color:#93c5fd;">💡【新資金單向投入法】新增資金 <strong>$${fmt(dcaVal)}</strong> 按當日目標槓桿 <strong>${targetToday.toFixed(2)}x</strong>，應加買 <strong>$${fmt(dcaExposure)}</strong> 曝險（絕對不補舊部位的自然衰減）。</div>`;
-                    }
-
-                    // 輸入淨值 → 若無部位則自動反推，若已有部位則直接檢驗
-                    equityInput.addEventListener('input', () => {
-                        lastEdited = 'equity';
-                        const equity = parseFloat(equityInput.value);
-                        if (isNaN(equity) || equity <= 0) {
-                            const dcaVal = dcaInput ? parseFloat(dcaInput.value) : 0;
-                            if (!isNaN(dcaVal) && dcaVal > 0) {
-                                renderDcaOnly(dcaVal);
-                            } else {
-                                resultBox.classList.add('hidden');
-                            }
-                            return;
-                        }
-                        const posVal = positionInput.value.trim();
-                        if (posVal === '') {
-                            const targetPos = Math.round(equity * market.target_today);
-                            positionInput.value = targetPos;
-                            calculateAction(equity, targetPos);
-                        } else {
-                            const position = parseFloat(posVal);
-                            if (isNaN(position) || position <= 0) {
-                                const targetPos = Math.round(equity * market.target_today);
-                                positionInput.value = targetPos;
-                                calculateAction(equity, targetPos);
-                            } else {
-                                calculateAction(equity, position);
-                            }
-                        }
-                    });
-
-                    // 輸入部位 → 嚴禁覆寫 equityInput.value！
-                    positionInput.addEventListener('input', () => {
-                        lastEdited = 'position';
-                        const position = parseFloat(positionInput.value);
-                        if (isNaN(position) || position <= 0) {
-                            const dcaVal = dcaInput ? parseFloat(dcaInput.value) : 0;
-                            if (!isNaN(dcaVal) && dcaVal > 0) {
-                                renderDcaOnly(dcaVal);
-                            } else {
-                                resultBox.classList.add('hidden');
-                            }
-                            return;
-                        }
-                        const eqVal = equityInput.value.trim();
-                        if (eqVal !== '') {
-                            const equity = parseFloat(eqVal);
-                            if (!isNaN(equity) && equity > 0) {
-                                calculateAction(equity, position);
-                                return;
-                            }
-                        }
-                        // 若 equity 為空，才反推建議淨值
-                        const neededEquity = Math.round(position / market.target_today);
-                        equityInput.value = neededEquity;
-                        calculateAction(neededEquity, position);
-                    });
-
-                    // 輸入本月新增資金 DCA
-                    if (dcaInput) {
-                        dcaInput.addEventListener('input', () => {
-                            const dcaVal = parseFloat(dcaInput.value);
-                            const equity = parseFloat(equityInput.value);
-                            const position = parseFloat(positionInput.value);
-                            if (!isNaN(equity) && equity > 0 && !isNaN(position) && position > 0) {
-                                calculateAction(equity, position);
-                            } else if (!isNaN(dcaVal) && dcaVal > 0) {
-                                renderDcaOnly(dcaVal);
-                            } else {
-                                resultBox.classList.add('hidden');
-                            }
-                        });
+                        summaryDiv.innerHTML = `目標槓桿: <strong>${targetToday.toFixed(2)}x</strong> ｜ 本月新資金: <strong>$${fmt(dcaVal)}</strong>`;
+                        instructionDiv.innerHTML = `<div class="lev-check lev-ok">💡【新資金單向投入法】新增資金 <strong>$${fmt(dcaVal)}</strong> 按當日目標槓桿 <strong>${targetToday.toFixed(2)}x</strong>，應加買 <strong>$${fmt(dcaExposure)}</strong> 曝險（絕對不補舊部位的自然衰減）。</div>`;
                     }
 
                     function calculateAction(equity, position) {
                         const targetToday = market.target_today;
                         const targetPos = equity * targetToday;
                         const actualLev = position / equity;
-                        const trimLine = market.trim_trigger_lev || (targetToday + 0.15); // 固定 +0.15x 絕對容差帶
+                        const marginAcct = Math.round(equity * 2 / 3);
+                        const idleCash = Math.round(equity * 1 / 3);
 
                         resultBox.classList.remove('hidden');
-                        instructionDiv.className = 'action-instruction';
+                        savedPill.classList.remove('hidden', 'danger', 'ok');
+                        savedPill.textContent = `實質 ${actualLev.toFixed(2)}x`;
+                        savedPill.classList.add(actualLev > trimLine ? 'danger' : 'ok');
 
-                        const marginAcct = Math.round(equity * 2/3);
-                        const idleCash = Math.round(equity * 1/3);
+                        if (actualLev > trimLine) {
+                            calcDrawer.open = true; // 超標時自動展開警示
+                        }
 
-                        // 判斷是否需要進行真實槓桿偏離檢驗 (部位與目標部位存在差異，或手動修改過部位)
-                        const isDeviation = Math.abs(actualLev - targetToday) >= 0.01 || lastEdited === 'position';
+                        summaryDiv.innerHTML = `目標部位: <strong>$${fmt(targetPos)}</strong> ｜ 2/3 保證金: <strong>$${fmt(marginAcct)}</strong> ｜ 1/3 防禦金: <strong>$${fmt(idleCash)}</strong>`;
 
                         let levCheck = '';
-                        if (isDeviation) {
-                            const diff = actualLev - targetToday;
-                            if (actualLev < targetToday) {
-                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（低於目標 ${targetToday.toFixed(2)}x）— 自然衰退中，<strong>完全不動作</strong>，讓利潤奔跑。</div>`;
-                            } else if (actualLev <= trimLine) {
-                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（目標 ${targetToday.toFixed(2)}x ～ 修剪線 ${trimLine.toFixed(2)}x 之間）— 落在 <strong>+0.15x 修剪緩衝帶內</strong>，日常雜訊不需碰它。</div>`;
-                            } else {
-                                const excessPos = Math.round(position - targetPos);
-                                levCheck = `<div class="lev-check lev-danger">🚨 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong> 已突破修剪線 <strong>${trimLine.toFixed(2)}x</strong>！超標 +${diff.toFixed(2)}x<br>⚠️ <strong>需修剪回目標 ${targetToday.toFixed(2)}x</strong>（非修回 ${trimLine.toFixed(2)}x），應減持約 <strong>$${fmt(excessPos)}</strong> 部位，或用本月 DCA 資金自然稀釋。</div>`;
-                            }
-                        }
-
-                        if (!isDeviation) {
-                            summaryDiv.innerHTML = `
-                                <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-                                    <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
-                                    <span>目標部位: <strong>$${fmt(targetPos)}</strong></span>
-                                    <span>修剪線: <strong>${trimLine.toFixed(2)}x</strong></span>
-                                </div>`;
-                            instructionDiv.innerHTML = `
-                                💡 淨值 <strong>$${fmt(equity)}</strong> 在 ${targetToday.toFixed(2)}x 槓桿下，應持有 <strong>$${fmt(targetPos)}</strong> 的部位。<br>
-                                🛡️ 保證金帳戶放 <strong>$${fmt(marginAcct)}</strong>，其餘 <strong>$${fmt(idleCash)}</strong> 放生息帳戶。`;
-                            instructionDiv.classList.add('hold');
+                        const diff = actualLev - targetToday;
+                        if (Math.abs(diff) < 0.01 && lastEdited === 'equity') {
+                            levCheck = `<div class="lev-check lev-ok">✅ 標準建倉：淨值 <strong>$${fmt(equity)}</strong> 對應 <strong>${targetToday.toFixed(2)}x</strong> 目標曝險為 <strong>$${fmt(targetPos)}</strong>。</div>`;
+                        } else if (actualLev < targetToday) {
+                            levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（低於目標 ${targetToday.toFixed(2)}x）— 自然衰退中，<strong>完全不動作</strong>，讓利潤奔跑。</div>`;
+                        } else if (actualLev <= trimLine) {
+                            levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（介於 ${targetToday.toFixed(2)}x ～ ${trimLine.toFixed(2)}x）— 落在 <strong>+0.15x 緩衝帶內</strong>，無須動作。</div>`;
                         } else {
-                            summaryDiv.innerHTML = `
-                                <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-                                    <span>目標槓桿: <strong>${targetToday.toFixed(2)}x</strong></span>
-                                    <span>實際槓桿: <strong>${actualLev.toFixed(2)}x</strong></span>
-                                    <span>修剪線: <strong>${trimLine.toFixed(2)}x</strong></span>
-                                </div>`;
-                            instructionDiv.innerHTML = `
-                                💡 持有 <strong>$${fmt(position)}</strong> 部位 ÷ 淨值 <strong>$${fmt(equity)}</strong> = 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong><br>
-                                🛡️ 保證金帳戶放 <strong>$${fmt(marginAcct)}</strong>，其餘 <strong>$${fmt(idleCash)}</strong> 放生息帳戶。`;
-                            instructionDiv.classList.add(actualLev > trimLine ? 'sell' : 'hold');
+                            const excessPos = Math.round(position - targetPos);
+                            levCheck = `<div class="lev-check lev-danger">🚨 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong> 突破修剪線 <strong>${trimLine.toFixed(2)}x</strong>（超標 +${diff.toFixed(2)}x）！<br>⚠️ <strong>須直接砍回目標 ${targetToday.toFixed(2)}x</strong>：請減持約 <strong>$${fmt(excessPos)}</strong> 曝險，或以本月 DCA 新資金自然稀釋。</div>`;
                         }
 
-                        if (levCheck) {
-                            instructionDiv.innerHTML += levCheck;
-                        }
+                        instructionDiv.innerHTML = levCheck;
 
-                        // DCA 新增資金試算
                         const dcaVal = dcaInput ? parseFloat(dcaInput.value) : 0;
                         if (!isNaN(dcaVal) && dcaVal > 0) {
                             const dcaExposure = Math.round(dcaVal * targetToday);
-                            instructionDiv.innerHTML += `<div class="dca-hint" style="margin-top:10px; padding:8px 12px; background:rgba(59,130,246,0.1); border-left:3px solid #3b82f6; border-radius:4px; font-size:13px; color:#93c5fd;">💡【新資金單向投入法】新增資金 <strong>$${fmt(dcaVal)}</strong> 按當日目標槓桿 <strong>${targetToday.toFixed(2)}x</strong>，應加買 <strong>$${fmt(dcaExposure)}</strong> 曝險（絕對不補舊部位的自然衰減）。</div>`;
+                            instructionDiv.innerHTML += `<div class="lev-check lev-ok" style="margin-top:8px;">💡【新資金單向投入】新增 <strong>$${fmt(dcaVal)}</strong> × <strong>${targetToday.toFixed(2)}x</strong> = 應加買 <strong>$${fmt(dcaExposure)}</strong> 曝險（不補舊倉衰減）。</div>`;
                         }
                     }
 
+                    equityInput.addEventListener('input', () => {
+                        lastEdited = 'equity';
+                        saveState();
+                        const equity = parseFloat(equityInput.value);
+                        if (isNaN(equity) || equity <= 0) {
+                            const dcaVal = parseFloat(dcaInput.value);
+                            if (!isNaN(dcaVal) && dcaVal > 0) renderDcaOnly(dcaVal);
+                            else resultBox.classList.add('hidden');
+                            return;
+                        }
+                        const posVal = positionInput.value.trim();
+                        if (posVal === '' || isNaN(parseFloat(posVal))) {
+                            const targetPos = Math.round(equity * market.target_today);
+                            positionInput.value = targetPos;
+                            saveState();
+                            calculateAction(equity, targetPos);
+                        } else {
+                            calculateAction(equity, parseFloat(posVal));
+                        }
+                    });
+
+                    positionInput.addEventListener('input', () => {
+                        lastEdited = 'position';
+                        saveState();
+                        const position = parseFloat(positionInput.value);
+                        if (isNaN(position) || position <= 0) {
+                            const dcaVal = parseFloat(dcaInput.value);
+                            if (!isNaN(dcaVal) && dcaVal > 0) renderDcaOnly(dcaVal);
+                            else resultBox.classList.add('hidden');
+                            return;
+                        }
+                        const eqVal = equityInput.value.trim();
+                        if (eqVal !== '' && !isNaN(parseFloat(eqVal)) && parseFloat(eqVal) > 0) {
+                            calculateAction(parseFloat(eqVal), position);
+                            return;
+                        }
+                        const neededEquity = Math.round(position / market.target_today);
+                        equityInput.value = neededEquity;
+                        saveState();
+                        calculateAction(neededEquity, position);
+                    });
+
+                    dcaInput.addEventListener('input', () => {
+                        const dcaVal = parseFloat(dcaInput.value);
+                        const equity = parseFloat(equityInput.value);
+                        const position = parseFloat(positionInput.value);
+                        if (!isNaN(equity) && equity > 0 && !isNaN(position) && position > 0) {
+                            calculateAction(equity, position);
+                        } else if (!isNaN(dcaVal) && dcaVal > 0) {
+                            renderDcaOnly(dcaVal);
+                        } else {
+                            resultBox.classList.add('hidden');
+                        }
+                    });
+
+                    // 載入 localStorage 記憶的淨值與部位
+                    try {
+                        const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+                        if (saved && saved.equity && saved.position) {
+                            equityInput.value = saved.equity;
+                            positionInput.value = saved.position;
+                            lastEdited = 'position';
+                            calculateAction(parseFloat(saved.equity), parseFloat(saved.position));
+                        }
+                    } catch (e) {}
+
                     dashboard.appendChild(clone);
                 });
+
+                if (latestDate) dataDateTag.textContent = `EOD: ${latestDate}`;
+                if (anyLevChanged) {
+                    globalActionPill.textContent = '⚡ 今日目標槓桿變動 · 請掛限價單調倉';
+                    globalActionPill.className = 'action-pill warn';
+                } else {
+                    globalActionPill.textContent = '🟢 今日目標槓桿不變 · 讓利潤奔跑';
+                    globalActionPill.className = 'action-pill bull';
+                }
             })
             .catch(err => {
-                dashboard.innerHTML = `<div style="text-align:center; color:#ef4444; padding:20px;">連線失敗，請確認伺服器與網路狀態。<br><br>${err.message}</div>`;
-                console.error(err);
+                dashboard.innerHTML = `<div class="loading-box" style="color:#ef4444;">連線失敗：${err.message}</div>`;
             });
     }
 
@@ -302,111 +277,86 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const card = document.createElement('div');
                     card.className = `rollover-card ${item.status_class}`;
-
-                    const inputPlaceholder = key === 'tw' 
-                        ? '輸入券商價差 (例如: +10 或 -30)' 
-                        : '輸入跨季價差點數 (例如: 180)';
+                    const inputPlaceholder = key === 'tw' ? '輸入跨月點差 (如 -20 或 10)' : '輸入跨季點差 (如 240)';
 
                     card.innerHTML = `
                         <div class="ro-header-compact">
-                            <div class="ro-title-left">
+                            <div>
                                 <span class="ro-market-name">${item.market}</span>
                                 <span class="ro-contract-tag font-mono">${item.contract_info}</span>
                             </div>
-                            <span class="status-badge ${item.status_class}">${item.badge}</span>
+                            <span class="status-badge ${item.status_class === 'bull' ? 'bull' : 'bear'}">${item.badge}</span>
                         </div>
-
                         <div class="ro-summary-bar">
-                            <span class="ro-countdown-chip ${item.days_left <= 3 ? 'urgent' : ''}">
-                                倒數 <strong>${item.days_left}</strong> 天（${item.settlement_date} 結算）
+                            <span class="ro-countdown-chip font-mono ${item.days_left <= 3 ? 'urgent' : ''}">
+                                結算倒數 ${item.days_left}d (${item.settlement_date})
                             </span>
-                            <span class="ro-action-hint">${item.action}</span>
+                            <span>${item.action}</span>
                         </div>
-
-                        <div class="ro-quick-checker">
-                            <div class="ro-input-row">
-                                <label class="ro-input-label">⚡ 價差健檢 <span class="ro-nq-base" style="font-size:11px; color:#94a3b8; font-weight:normal;"></span></label>
-                                <div class="ro-input-wrapper">
-                                    <input type="number" class="ro-spread-input" placeholder="${inputPlaceholder}" step="any">
-                                    <span class="ro-input-unit">點</span>
-                                </div>
+                        <div class="ro-input-row">
+                            <label class="ro-input-label">⚡ 價差試算 <span class="ro-nq-base font-mono"></span></label>
+                            <div class="ro-input-wrapper">
+                                <input type="number" class="ro-spread-input font-mono" placeholder="${inputPlaceholder}" step="any">
+                                <span class="ro-input-unit">點</span>
                             </div>
-                            <div class="ro-verdict-compact hidden"></div>
                         </div>
+                        <div class="ro-verdict-compact hidden"></div>
                     `;
 
-                    // 綁定極簡價差健檢
                     const input = card.querySelector('.ro-spread-input');
                     const verdict = card.querySelector('.ro-verdict-compact');
 
                     if (key === 'tw') {
                         input.addEventListener('input', () => {
                             const val = input.value.trim();
-                            if (val === '') {
-                                verdict.classList.add('hidden');
-                                return;
-                            }
+                            if (val === '') { verdict.classList.add('hidden'); return; }
                             const spread = parseFloat(val);
                             verdict.classList.remove('hidden');
                             if (spread <= 0) {
                                 verdict.className = 'ro-verdict-compact bull';
-                                verdict.innerHTML = `🔥 <strong>逆價差送分題 (${spread} 點)</strong>：遠月比近月便宜，無腦掛【跨月價差單】直接換約，倒賺基差！`;
+                                verdict.innerHTML = `🔥 <strong>逆價差送分題 (${spread} 點)</strong>：遠月折價，無腦掛跨月價差單換約！`;
                             } else if (spread <= 15) {
                                 verdict.className = 'ro-verdict-compact bull';
-                                verdict.innerHTML = `🟢 <strong>價差極窄 (+${spread} 點)</strong>：摩擦成本極低，建議立即以【跨月價差單】掛買一換約。`;
+                                verdict.innerHTML = `🟢 <strong>價差極窄 (+${spread} 點)</strong>：摩擦極低，建議直接掛價差單換約。`;
                             } else if (spread <= 25) {
                                 verdict.className = 'ro-verdict-compact neutral';
-                                verdict.innerHTML = `🟡 <strong>常態價差 (+${spread} 點)</strong>：可觀察盤中急殺是否有更甜點位，結算前 1~2 天再換。`;
+                                verdict.innerHTML = `🟡 <strong>常態價差 (+${spread} 點)</strong>：可等盤中急殺或結算前 1~2 天再換。`;
                             } else {
                                 verdict.className = 'ro-verdict-compact bear';
-                                verdict.innerHTML = `🔴 <strong>價差偏大 (+${spread} 點)</strong>：遠月溢價偏高，建議暫緩，等盤中急殺或結算前價差收斂。`;
+                                verdict.innerHTML = `🔴 <strong>價差偏大 (+${spread} 點)</strong>：遠月溢價偏高，建議暫緩。`;
                             }
                         });
                     } else {
                         const nqBaseSpan = card.querySelector('.ro-nq-base');
-                        const getNqImplied = () => (window.latestQqqClose || 500) * 41.15;
-                        if (nqBaseSpan) {
-                            nqBaseSpan.textContent = `(基準點位: ~${Math.round(getNqImplied())} 點)`;
-                        }
+                        const getNqImplied = () => (window.latestQqqClose || 700) * 41.15;
+                        if (nqBaseSpan) nqBaseSpan.textContent = `(~${Math.round(getNqImplied())}點)`;
 
                         input.addEventListener('input', () => {
                             const val = input.value.trim();
-                            if (val === '') {
-                                verdict.classList.add('hidden');
-                                return;
-                            }
+                            if (val === '') { verdict.classList.add('hidden'); return; }
                             const spread = parseFloat(val);
-                            const nqImplied = getNqImplied();
-                            const annRate = (spread / nqImplied) * (365 / 91) * 100;
+                            const annRate = (spread / getNqImplied()) * (365 / 91) * 100;
                             verdict.classList.remove('hidden');
-
                             if (annRate <= 0) {
                                 verdict.className = 'ro-verdict-compact bull';
-                                verdict.innerHTML = `🔥 <strong>罕見逆價差 (年化 ${annRate.toFixed(1)}%)</strong>：次季比當季便宜，無腦掛單換約！`;
+                                verdict.innerHTML = `🔥 <strong>罕見逆價差 (年化 ${annRate.toFixed(2)}%)</strong>：立即掛單換約！`;
                             } else if (annRate <= 4.2) {
                                 verdict.className = 'ro-verdict-compact bull';
-                                verdict.innerHTML = `🟢 <strong>超值低價 (年化 ${annRate.toFixed(1)}%)</strong>：低於美債利率，建議以【Calendar Spread】掛 Mid-Price 換約！`;
+                                verdict.innerHTML = `🟢 <strong>超值低價 (年化 ${annRate.toFixed(2)}%)</strong>：低於短債利率，掛 Mid-Price 換約！`;
                             } else if (annRate <= 4.8) {
                                 verdict.className = 'ro-verdict-compact bull';
-                                verdict.innerHTML = `🟢 <strong>合理定價 (年化 ${annRate.toFixed(1)}%)</strong>：符合市場常態，在 Roll Week 期間以價差單從容成交。`;
+                                verdict.innerHTML = `🟢 <strong>合理定價 (年化 ${annRate.toFixed(2)}%)</strong>：符合常態利率，於 Roll Week 從容換約。`;
                             } else {
                                 verdict.className = 'ro-verdict-compact bear';
-                                verdict.innerHTML = `🔴 <strong>溢價偏貴 (年化 ${annRate.toFixed(1)}%)</strong>：遠月追高，建議等美股盤中拉回或價差收縮再換。`;
+                                verdict.innerHTML = `🔴 <strong>溢價偏貴 (年化 ${annRate.toFixed(2)}%)</strong>：建議等拉回價差收斂再換。`;
                             }
                         });
                     }
-
                     container.appendChild(card);
                 });
-            })
-            .catch(err => {
-                console.error('Rollover fetch error:', err);
-                container.innerHTML = `<div style="color:#ef4444; padding:15px; text-align:center;">轉倉雷達連線失敗，請稍後重試</div>`;
             });
     }
 
     fetchData();
     fetchRolloverData();
 });
-
-

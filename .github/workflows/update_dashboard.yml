@@ -43,6 +43,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: 執行量化運算並產出靜態網站
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           python build_static.py
 

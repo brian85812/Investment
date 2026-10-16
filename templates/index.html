@@ -3,102 +3,157 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <!-- iOS Web App (PWA) 支援 -->
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="護城河戰情">
-    <meta name="theme-color" content="#020617">
-    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230f172a'/><text y='70' x='50' font-size='60' text-anchor='middle'>🏰</text></svg>">
-    <title>護城河戰情儀表板</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=10">
+    <meta name="apple-mobile-web-app-title" content="Moat Quant">
+    <meta name="theme-color" content="#070a12">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230b1120'/><text y='70' x='50' font-size='58' text-anchor='middle'>⚡</text></svg>">
+    <title>MOAT QUANT // 護城河動態槓桿終端 v3.0</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css?v=30">
 </head>
 <body>
-    <div class="app-container">
-        <header>
-            <div class="glow-orb"></div>
-            <h1>戰情儀表板 <span>v2.0</span></h1>
-            <p>護城河動態槓桿系統</p>
+    <div class="terminal-shell">
+        <!-- 頂部全域戰情列 -->
+        <header class="topbar">
+            <div class="brand-group">
+                <div class="brand-dot"></div>
+                <div>
+                    <div class="brand-title">MOAT QUANT <span class="ver-tag">v3.0</span></div>
+                    <div class="brand-sub">US QQQ 60% · TW 006208 40% · EOD Close System</div>
+                </div>
+            </div>
+            <div class="topbar-meta">
+                <span id="global-action-pill" class="action-pill neutral">載入訊號中...</span>
+                <span id="data-date-tag" class="date-tag font-mono">--</span>
+            </div>
         </header>
 
-        <main id="dashboard" class="loading-state">
-            <div class="spinner"></div>
-            <p class="loading-text">正在分析即時大盤數據...</p>
+        <!-- 雙市場主戰情網格 -->
+        <main id="dashboard" class="market-grid loading-state">
+            <div class="loading-box">
+                <div class="spinner"></div>
+                <p>正在同步 EOD 市場訊號...</p>
+            </div>
         </main>
 
         <!-- 期貨轉倉智能雷達 -->
-        <section id="rollover-radar" class="glass-card rollover-section">
-            <div class="card-header rollover-header">
-                <div>
+        <section id="rollover-radar" class="panel rollover-panel">
+            <div class="panel-header">
+                <div class="panel-title-group">
                     <h2>🎯 期貨轉倉智能雷達</h2>
-                    <p class="sub-desc">台指 / 那指 結算期追蹤與價差換約 SOP</p>
+                    <span class="panel-sub">TX / NQ 結算倒數與跨期價差健檢</span>
                 </div>
-                <span class="radar-tag">LIVE SPREAD</span>
+                <span class="mono-tag">CALENDAR SPREAD</span>
             </div>
             <div id="rollover-cards" class="rollover-grid">
-                <div class="rollover-loading">載入轉倉排程中...</div>
+                <div class="loading-inline">載入轉倉排程中...</div>
             </div>
         </section>
     </div>
 
-    <!-- 範本：市場卡片 -->
+    <!-- 市場卡片 Template -->
     <template id="market-card-template">
-        <div class="glass-card market-card">
-            <div class="card-header">
-                <h2 class="market-name"></h2>
-                <span class="status-badge"></span>
-            </div>
-            
-            <div class="market-stats">
-                <div class="stat-box">
-                    <span class="stat-label">最新報價</span>
-                    <span class="stat-value price"></span>
+        <article class="panel market-card">
+            <!-- 卡片頂部：標的名稱與狀態燈 -->
+            <div class="card-top">
+                <div class="title-stack">
+                    <div class="title-line">
+                        <h2 class="market-name"></h2>
+                        <span class="ticker-code font-mono"></span>
+                    </div>
+                    <div class="sub-badges">
+                        <span class="status-badge"></span>
+                        <span class="ext-badge hidden"></span>
+                        <span class="accel-badge hidden"></span>
+                        <span class="deep-badge hidden"></span>
+                    </div>
                 </div>
-                <div class="stat-box target-lev-box">
-                    <span class="stat-label">目標槓桿</span>
-                    <span class="stat-value target-lev"></span>
-                    <span class="stat-sub trim-trigger-tag" style="font-size: 11px; color: #94a3b8; margin-top: 3px;"></span>
-                </div>
-                <div class="stat-box">
-                    <span class="stat-label">動能階梯</span>
-                    <span class="stat-value steps"></span>
+                <div class="signal-delta-box">
+                    <span class="delta-label">今日動作</span>
+                    <span class="delta-badge font-mono"></span>
                 </div>
             </div>
 
-            <div class="market-details">
-                <div class="ma-row">
-                    <span class="ma-badge fast-ma"></span>
-                    <span class="ma-badge slow-ma"></span>
-                    <span class="ma-badge bear-ma"></span>
-                    <span class="ma-badge trim-badge"></span>
+            <!-- 核心三大指標 (價格 / 目標槓桿 / 動能階梯) -->
+            <div class="hero-metrics">
+                <div class="metric-cell">
+                    <span class="metric-label">最新收盤 (EOD)</span>
+                    <div class="metric-val font-mono price"></div>
+                    <div class="metric-foot font-mono ma-dist-text"></div>
                 </div>
+                <div class="metric-cell highlight-cell">
+                    <span class="metric-label">目標槓桿 (Target)</span>
+                    <div class="metric-val font-mono target-lev"></div>
+                    <div class="metric-foot font-mono prev-and-trim"></div>
+                </div>
+                <div class="metric-cell">
+                    <span class="metric-label">動能階梯 (Step)</span>
+                    <div class="metric-val font-mono steps"></div>
+                    <div class="step-bar-track"></div>
+                </div>
+            </div>
+
+            <!-- 2x2 結構化技術防線矩陣 -->
+            <div class="tech-matrix">
+                <div class="tech-item">
+                    <span class="tech-k">📈 加碼突破門檻 (Close)</span>
+                    <span class="tech-v font-mono bull-text high-bw-val"></span>
+                </div>
+                <div class="tech-item">
+                    <span class="tech-k">📉 減碼跌破門檻 (Close)</span>
+                    <span class="tech-v font-mono warn-text low-bw-val"></span>
+                </div>
+                <div class="tech-item">
+                    <span class="tech-k">🛡️ 快線 / 220MA 年線</span>
+                    <span class="tech-v font-mono fast-slow-ma"></span>
+                </div>
+                <div class="tech-item">
+                    <span class="tech-k">🚨 60MA / C1 深熊線 (97%)</span>
+                    <span class="tech-v font-mono bear-c1-ma"></span>
+                </div>
+            </div>
+
+            <!-- 策略診斷摘要 -->
+            <div class="signal-callout">
                 <p class="strategy-explanation"></p>
             </div>
 
-            <div class="calculator-section">
-                <h3>📐 實戰帳戶試算</h3>
-                <p class="calc-hint">輸入任一欄位，自動反推另一欄位（依當前目標槓桿）</p>
-                <div class="input-group">
-                    <label>總淨值 (資金)</label>
-                    <input type="number" class="equity-input" placeholder="例如: 5000000" inputmode="numeric">
+            <!-- 折疊式實戰部位與 DCA 試算器 (支援 localStorage 自動記憶) -->
+            <details class="calc-drawer">
+                <summary class="calc-summary-bar">
+                    <div class="calc-bar-left">
+                        <span>📐 實戰部位與 DCA 試算器</span>
+                        <span class="saved-lev-pill font-mono hidden"></span>
+                    </div>
+                    <span class="drawer-chevron">展開試算 ▾</span>
+                </summary>
+                <div class="calc-body">
+                    <div class="calc-inputs-grid">
+                        <div class="field">
+                            <label>帳戶總淨值 <span class="auto-save-tag">自動記憶</span></label>
+                            <input type="number" class="equity-input font-mono" placeholder="例: 9000000" inputmode="numeric">
+                        </div>
+                        <div class="field">
+                            <label>目前部位曝險 <span class="auto-save-tag">自動記憶</span></label>
+                            <input type="number" class="position-input font-mono" placeholder="例: 17100000" inputmode="numeric">
+                        </div>
+                        <div class="field">
+                            <label>本月新資金 DCA (選填)</label>
+                            <input type="number" class="dca-input font-mono" placeholder="例: 200000" inputmode="numeric">
+                        </div>
+                    </div>
+                    <div class="action-result hidden">
+                        <div class="calc-summary font-mono"></div>
+                        <div class="action-instruction"></div>
+                    </div>
                 </div>
-                <div class="input-group">
-                    <label>目前部位價值 (曝險)</label>
-                    <input type="number" class="position-input" placeholder="例如: 13800000" inputmode="numeric">
-                </div>
-                <div class="input-group">
-                    <label>本月新增資金 DCA (選填)</label>
-                    <input type="number" class="dca-input" placeholder="例如: 200000" inputmode="numeric">
-                </div>
-                
-                <div class="action-result hidden">
-                    <div class="calc-summary"></div>
-                    <div class="action-instruction"></div>
-                </div>
-            </div>
-        </div>
+            </details>
+        </article>
     </template>
 
-    <script src="/static/script.js?v=13"></script>
+    <script src="/static/script.js?v=30"></script>
 </body>
 </html>
