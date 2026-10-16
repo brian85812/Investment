@@ -28,7 +28,7 @@ def send_push_notification(signals, rollover):
         rollover.get(k, {}).get('days_left', 99) <= 2 for k in ('tw', 'us')
     )
 
-    header = "🚨 <b>【護城河調倉指令警報】</b>" if urgent else "🟢 <b>【護城河 EOD 戰情 · 今日維持】</b>"
+    header = "🚨 <b>【動態槓桿 · 調倉指令警報】</b>" if urgent else "🟢 <b>【動態槓桿 EOD 戰情 · 今日維持】</b>"
     lines = [header, ""]
     for s in signals:
         chg = (
