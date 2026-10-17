@@ -93,7 +93,8 @@ def build():
         allocs=[0.0, 0.5, 0.8, 1.0],
         grace_days=0,
         extension_guard={'threshold': 1.16, 'cap': 2.0},
-        deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4}
+        deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True},
+        add_above_bear=True
     )
     
     tw = compute_signal(

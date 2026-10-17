@@ -196,12 +196,13 @@ def fetch_robust_market_data(ticker):
 
     return df
 
-def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None):
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None, add_above_bear=False):
     """
     grace_days: 跌破年線容忍天數（美股 QQQ 為 0，台股 006208 為 1，即連續 2 天破線才確認）
     extension_guard: dict with {'threshold': 1.16, 'cap': 2.0} or None.
     bull_acceleration: dict with {'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40} or None.
-    deep_bear_guard: dict with {'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4} or None.
+    deep_bear_guard: dict with {'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True/False} or None.
+    add_above_bear: 是否要求 FastMA >= 60MA 才允許向上突破升檔（美股 QQQ 啟用 D1-US 為 True，台股為 False）
     """
     df = fetch_robust_market_data(ticker)
     if df is None or len(df) == 0:
@@ -285,9 +286,10 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 accel_active = False
                 cur_base = base_leverage
 
+        req_bear = add_above_bear or (deep_bear_guard and deep_bear_guard.get('add_above_bear', False))
         if in_trend and (i - last_action_idx >= cooldown):
             if current_close > high_bw:
-                if step_idx < max_idx:
+                if step_idx < max_idx and (not req_bear or pd.isna(sma_bear) or sma_fast >= sma_bear):
                     step_idx += 1
                     last_action_idx = i
             elif current_close < low_bw:
@@ -440,11 +442,18 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 )
             else:
                 diff_h = round(max(h_bw - cur_p, 0.01), 2)
-                explanation = (
-                    f"⚡【多頭順勢巡航 (Step {step_idx}/{max_idx}) · 維持 {curr_target:.2f}x】"
-                    f"趨勢穩健推進中，今日目標槓桿不變，無須任何操作。"
-                    f"距下一階突破加碼門檻 (>{h_bw}) 差 {diff_h} 點，下檔減碼防線設於 <{l_bw}。"
-                )
+                if req_bear and sma_bear_val is not None and f_ma < sma_bear_val:
+                    explanation = (
+                        f"🛡️【季線下整理凍結加碼 (Step {step_idx}/{max_idx}) · 維持 {curr_target:.2f}x】"
+                        f"目前位於年線之上，但快線 {fast_ma}MA ({f_ma}) 尚未站回季線 {bear_w}MA ({sma_bear_val})，"
+                        f"啟動 D1 夾層保護：暫時凍結向上突破升檔，僅防守下檔減碼線 (<{l_bw})；待 {fast_ma}MA 站回 {sma_bear_val} 即解鎖加碼。"
+                    )
+                else:
+                    explanation = (
+                        f"⚡【多頭順勢巡航 (Step {step_idx}/{max_idx}) · 維持 {curr_target:.2f}x】"
+                        f"趨勢穩健推進中，今日目標槓桿不變，無須任何操作。"
+                        f"距下一階突破加碼門檻 (>{h_bw}) 差 {diff_h} 點，下檔減碼防線設於 <{l_bw}。"
+                    )
 
     # === 附加狀態尾註（僅在牛初加速啟動時補充） ===
     bull_accel_active = accel_active if bull_acceleration else False
@@ -504,7 +513,8 @@ def refresh_cache():
             allocs=[0.0, 0.5, 0.8, 1.0],
             grace_days=0,
             extension_guard={'threshold': 1.16, 'cap': 2.0},
-            deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4}
+            deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True},
+            add_above_bear=True
         )
         if qqq is None and 'QQQ' in old_data_map:
             print("🛡️ [Layer 4] QQQ 啟動離線快取保底，沿用前次有效訊號")
