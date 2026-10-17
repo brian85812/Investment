@@ -37,11 +37,15 @@ def send_push_notification(signals, rollover):
             else f"維持 <b>{s['target_today']:.2f}x</b>"
         )
         if not s['in_trend']:
-            add_str = f"<code>站上年線&gt;{s['sma_slow_val']:.2f}</code>"
+            if s.get('pre_bull_active', False):
+                add_str = f"<code>季線總攻中(年線&gt;{s['sma_slow_val']:.2f})</code>"
+            else:
+                add_str = f"<code>站上年線&gt;{s['sma_slow_val']:.2f}</code>"
             sub_str = "<code>已處底倉</code>"
         else:
             if s.get('ext_guard_active', False):
-                add_str = "<code>過熱封頂2.0x</code>"
+                cap_v = s.get('ext_cap') or 1.8
+                add_str = f"<code>過熱封頂{cap_v:.1f}x</code>"
             elif s['step_idx'] >= s['max_steps']:
                 add_str = "<code>已滿載鎖定</code>"
             else:
@@ -89,22 +93,25 @@ def build():
     qqq = compute_signal(
         name="美股 QQQ", ticker="QQQ",
         base_leverage=0.8, max_leverage=3.0,
-        fast_ma=5, slow_ma=220, breakout_window=10, cooldown=3,
-        allocs=[0.0, 0.5, 0.8, 1.0],
+        fast_ma=5, slow_ma=220, breakout_window=8, breakout_up=8, breakout_dn=8, cooldown=8,
+        allocs=[0.0, 0.65, 0.85, 1.0],
         grace_days=0,
-        extension_guard={'threshold': 1.16, 'cap': 2.0},
+        extension_guard={'threshold': 1.16, 'cap': 1.8},
         deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True},
-        add_above_bear=True
+        add_above_bear=True,
+        pre_bull_boost=1.0
     )
     
     tw = compute_signal(
         name="台股 006208", ticker="006208.TW",
         base_leverage=1.0, max_leverage=3.0,
-        fast_ma=10, slow_ma=220, breakout_window=20, cooldown=5,
-        allocs=[0.0, 0.4, 0.7, 0.9, 1.0],
+        fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25, cooldown=10,
+        allocs=[0.0, 0.50, 0.75, 0.90, 1.0],
         grace_days=1,
         bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40},
-        deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5}
+        deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5},
+        add_above_bear=False,
+        pre_bull_boost=1.2
     )
     
     signals = [x for x in [qqq, tw] if x is not None]

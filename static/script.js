@@ -57,14 +57,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
 
                     // 附加狀態標籤
+                    const extCapVal = market.ext_cap ? market.ext_cap.toFixed(1) : '1.8';
                     const extBadge = clone.querySelector('.ext-badge');
                     if (market.ext_guard_active) {
-                        extBadge.textContent = `🌡️ 乖離過熱鎖 2.0x`;
+                        extBadge.textContent = `🌡️ 乖離過熱鎖 ${extCapVal}x`;
                         extBadge.classList.remove('hidden');
                     }
                     const accelBadge = clone.querySelector('.accel-badge');
                     if (market.bull_accel_active) {
                         accelBadge.textContent = `🚀 牛初加速 1.2x (餘 ${market.bull_accel_days_left}d)`;
+                        accelBadge.classList.remove('hidden');
+                    } else if (market.pre_bull_active) {
+                        accelBadge.textContent = `⚡ E3b 季線總攻 (${market.target_today.toFixed(1)}x)`;
                         accelBadge.classList.remove('hidden');
                     }
                     const deepBadge = clone.querySelector('.deep-badge');
@@ -106,7 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         highBwElem.textContent = `站上年線 > ${market.sma_slow_val.toFixed(2)}`;
                         highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
                     } else if (market.ext_guard_active) {
-                        highBwElem.textContent = `🌡️ 過熱封頂 2.0x (>${market.high_bw.toFixed(1)})`;
+                        highBwElem.textContent = `🌡️ 過熱封頂 ${extCapVal}x (>${market.high_bw.toFixed(1)})`;
                         highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
                     } else if (market.step_idx >= market.max_steps) {
                         highBwElem.textContent = `🔒 已達 ${market.max_leverage.toFixed(1)}x 滿載上限`;
