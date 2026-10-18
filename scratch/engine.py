@@ -37,22 +37,39 @@ def load_data():
 
 US, TW, IRX = load_data()
 
-US_P = dict(base=0.8, mx=3.0, f=5, s=220, bo=10, cd=3, allocs=[0, .5, .8, 1], grace_days=0, ext=(1.16, 2.0), accel=None, deep_bear=(60, 0.97, 0.4))
-TW_P = dict(base=1.0, mx=3.0, f=10, s=220, bo=20, cd=5, allocs=[0, .4, .7, .9, 1], grace_days=1, ext=None, accel=(40, 1.2, 252), deep_bear=(60, 0.97, 0.5))
+US_P = dict(
+    base=0.8, mx=3.0, f=5, s=220, bo=8, bo_up=8, bo_dn=8, cd=8,
+    allocs=[0, .65, .85, 1], grace_days=0, ext=(1.16, 1.8), accel=None,
+    deep_bear=(60, 0.97, 0.4), add_above_bear=True, pre_bull_boost=1.0
+)
+TW_P = dict(
+    base=1.0, mx=3.0, f=8, s=220, bo=15, bo_up=15, bo_dn=25, cd=10,
+    allocs=[0, .50, .75, .90, 1], grace_days=1, ext=None, accel=(40, 1.2, 252),
+    deep_bear=(60, 0.97, 0.5), add_above_bear=False, pre_bull_boost=1.2
+)
 
-def target_lev(d, base, mx, f, s, bo, cd, allocs, grace_days=0, ext=None, accel=None, deep_bear=None):
+def target_lev(d, base, mx, f, s, bo=None, cd=5, allocs=None, grace_days=0,
+               ext=None, accel=None, deep_bear=None, add_above_bear=False,
+               pre_bull_boost=None, bo_up=None, bo_dn=None):
+    if isinstance(bo, (tuple, list)):
+        w_up, w_dn = bo[0], bo[1]
+    else:
+        w_up = bo_up if bo_up is not None else (bo if bo is not None else 10)
+        w_dn = bo_dn if bo_dn is not None else (bo if bo is not None else 10)
+
     c = d['Close'].values
     F = d['Close'].rolling(f).mean().values
     S = d['Close'].rolling(s).mean().values
-    H = d['Close'].shift(1).rolling(bo).max().values
-    Lo = d['Close'].shift(1).rolling(bo).min().values
+    H = d['Close'].shift(1).rolling(w_up).max().values
+    Lo = d['Close'].shift(1).rolling(w_dn).min().values
     
-    bear_ma = deep_bear[0] if deep_bear else None
+    bear_ma = deep_bear[0] if deep_bear else (60 if (add_above_bear or pre_bull_boost is not None) else None)
     BMA = d['Close'].rolling(bear_ma).mean().values if bear_ma else None
 
     n = len(c)
     out = np.zeros(n)
     in_tr, step, last, below, def_days, acc_left = False, 0, -999, 0, 0, 0
+    pre_bull_on = False
     for i in range(1, n):
         if np.isnan(S[i-1]) or np.isnan(H[i-1]) or np.isnan(Lo[i-1]):
             continue
@@ -66,6 +83,7 @@ def target_lev(d, base, mx, f, s, bo, cd, allocs, grace_days=0, ext=None, accel=
         elif not in_tr:
             if sf >= ss and p0 >= ss:
                 in_tr = True
+                pre_bull_on = False
                 if accel and def_days >= accel[0]:
                     acc_left = accel[2]
                 def_days = 0
@@ -73,13 +91,23 @@ def target_lev(d, base, mx, f, s, bo, cd, allocs, grace_days=0, ext=None, accel=
                 def_days += 1
         if in_tr and i - last >= cd:
             if p0 > h and step < len(allocs) - 1:
-                step += 1; last = i
+                if not add_above_bear or np.isnan(bma) or sf >= bma:
+                    step += 1; last = i
             elif p0 < l and step > 0:
                 step -= 1; last = i
         cur_b = base
-        if not in_tr and deep_bear is not None and not np.isnan(bma):
-            if bma < ss * deep_bear[1]:
+        if not in_tr:
+            if deep_bear is not None and not np.isnan(bma) and bma < ss * deep_bear[1] and sf < bma:
                 cur_b = deep_bear[2]
+                pre_bull_on = False
+            elif pre_bull_boost is not None and not np.isnan(bma):
+                if p0 >= bma and sf >= bma:
+                    if p0 > h:
+                        pre_bull_on = True
+                else:
+                    pre_bull_on = False
+                if pre_bull_on:
+                    cur_b = pre_bull_boost
         if accel and in_tr and acc_left > 0:
             cur_b = accel[1]; acc_left -= 1
         lev = cur_b * (1 - allocs[step]) + mx * allocs[step]
