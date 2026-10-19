@@ -223,6 +223,12 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     deep_bear_history = []
     pre_bull_history = []
 
+    sim_L = base_leverage
+    last_action_event = None  # 記錄最近一次任何部位調整 (含加碼/減碼/+0.15x修剪)
+    last_trim_event = None    # 專門記錄最近一次向下減碼或 +0.15x 超標修剪
+    rf_ann = 0.045 if ticker == 'QQQ' else 0.013
+    sp_ann = 0.003 if ticker == 'QQQ' else 0.005
+
     df['SMA_fast'] = df['Close'].rolling(window=fast_ma).mean()
     df['SMA_slow'] = df['Close'].rolling(window=slow_ma).mean()
     # 與 engine.py 回測完全一致，以收盤價 Close 計算 N 日突破與跌破通道（支援不對稱通道 w_up / w_dn）
@@ -291,47 +297,108 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     pre_bull_on = False
                 if pre_bull_on:
                     cur_b = pre_bull_boost
-            target_history.append(cur_b)
-            deep_bear_history.append(is_deep)
-            pre_bull_history.append(pre_bull_on)
-            continue
+            target = cur_b
+        else:
+            # 4. 以下為 in_trend == True (多頭進攻狀態)，deep_bear 與 pre_bull 強制為 False
+            is_deep = False
+            pre_bull_on = False
+            cur_base = base_leverage
+            if accel_active and bull_acceleration:
+                accel_timer += 1
+                cur_base = bull_acceleration.get('accel_base', 1.2)
+                if accel_timer >= bull_acceleration.get('accel_days', 252):
+                    accel_active = False
+                    cur_base = base_leverage
 
-        # 4. 以下為 in_trend == True (多頭進攻狀態)，deep_bear 與 pre_bull 強制為 False
-        cur_base = base_leverage
-        if accel_active and bull_acceleration:
-            accel_timer += 1
-            cur_base = bull_acceleration.get('accel_base', 1.2)
-            if accel_timer >= bull_acceleration.get('accel_days', 252):
-                accel_active = False
-                cur_base = base_leverage
+            req_bear = add_above_bear or (deep_bear_guard and deep_bear_guard.get('add_above_bear', False))
+            if in_trend and (i - last_action_idx >= cooldown):
+                if current_close > high_bw:
+                    if step_idx < max_idx and (not req_bear or pd.isna(sma_bear) or sma_fast >= sma_bear):
+                        step_idx += 1
+                        last_action_idx = i
+                elif current_close < low_bw:
+                    if step_idx > 0:
+                        step_idx -= 1
+                        last_action_idx = i
 
-        req_bear = add_above_bear or (deep_bear_guard and deep_bear_guard.get('add_above_bear', False))
-        if in_trend and (i - last_action_idx >= cooldown):
-            if current_close > high_bw:
-                if step_idx < max_idx and (not req_bear or pd.isna(sma_bear) or sma_fast >= sma_bear):
-                    step_idx += 1
-                    last_action_idx = i
-            elif current_close < low_bw:
-                if step_idx > 0:
-                    step_idx -= 1
-                    last_action_idx = i
+            alloc_pct = allocs[step_idx]
+            target = cur_base * (1 - alloc_pct) + max_leverage * alloc_pct
 
-        alloc_pct = allocs[step_idx]
-        target = cur_base * (1 - alloc_pct) + max_leverage * alloc_pct
+            # === 乖離過熱冷卻器 (Extension Guard) ===
+            ext_guard_active = False
+            if extension_guard and sma_slow > 0:
+                ext_ratio = current_close / sma_slow
+                if ext_ratio > extension_guard['threshold']:
+                    original_target = target
+                    target = min(target, extension_guard['cap'])
+                    if target < original_target:
+                        ext_guard_active = True
 
-        # === 乖離過熱冷卻器 (Extension Guard) ===
-        ext_guard_active = False
-        if extension_guard and sma_slow > 0:
-            ext_ratio = current_close / sma_slow
-            if ext_ratio > extension_guard['threshold']:
-                original_target = target
-                target = min(target, extension_guard['cap'])
-                if target < original_target:
-                    ext_guard_active = True
+        # (接續第 3 階段與第 4 階段算出當日 target, is_deep, pre_bull_on, ext_guard_active 後)
+        if i > 0:
+            prev_close = df['Close'].iloc[i - 1]
+            r_day = (current_close / prev_close) - 1.0 if prev_close > 0 else 0.0
+            net_day = (rf_ann / 252.0) + sim_L * (r_day - (rf_ann + sp_ann) / 252.0)
+            sim_L = sim_L * (1.0 + r_day) / (1.0 + net_day) if (1.0 + net_day) > 0 else 0.0
+
+        prev_t = target_history[-1] if len(target_history) > 0 else base_leverage
+        bar_date_str = df.index[i].strftime('%Y-%m-%d')
+
+        if i > 0 and round(target, 2) != round(prev_t, 2):
+            # 發生系統目標槓桿改變 (換檔)
+            if not in_trend:
+                if is_deep and target < prev_t:
+                    act_label = "C1深熊減半"
+                elif pre_bull_on and target > prev_t:
+                    act_label = "E3b季線總攻"
+                elif target > prev_t:
+                    act_label = "C1季線復原"
+                else:
+                    act_label = "破年線退底倉"
+            else:
+                if target > prev_t:
+                    act_label = "突破加碼" if not (prev_t <= 1.2 and step_idx == 0) else "站上年線重啟"
+                elif ext_guard_active:
+                    act_label = "過熱鎖利壓回"
+                else:
+                    act_label = "跌破通道減碼"
+
+            evt = {
+                'date': bar_date_str,
+                'idx': i,
+                'from_lev': round(float(prev_t), 2),
+                'to_lev': round(float(target), 2),
+                'type': act_label
+            }
+            last_action_event = evt
+            if round(target, 2) < round(prev_t, 2):
+                last_trim_event = evt
+            sim_L = target
+
+        elif i > 0 and sim_L > target + 0.15:
+            # 目標槓桿未變，但大跌導致自然槓桿突破 +0.15x 修剪線
+            evt = {
+                'date': bar_date_str,
+                'idx': i,
+                'from_lev': round(float(sim_L), 2),
+                'to_lev': round(float(target), 2),
+                'type': "+0.15x超標修剪"
+            }
+            last_action_event = evt
+            last_trim_event = evt
+            sim_L = target
+        elif i == 0:
+            sim_L = target
 
         target_history.append(target)
-        deep_bear_history.append(False)
-        pre_bull_history.append(False)
+        deep_bear_history.append(is_deep)
+        pre_bull_history.append(pre_bull_on)
+
+    total_bars = len(df)
+    if last_action_event:
+        last_action_event['days_ago'] = (total_bars - 1) - last_action_event['idx']
+    if last_trim_event:
+        last_trim_event['days_ago'] = (total_bars - 1) - last_trim_event['idx']
 
     # === 計算前一天的目標槓桿 ===
     latest = df.iloc[-1]
@@ -531,7 +598,10 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'deep_bear_active': deep_bear_active,
         'pre_bull_active': pre_bull_active,
         'sma_bear_val': sma_bear_val,
-        'deep_bear_ratio': deep_bear_guard.get('ratio', 0.97) if deep_bear_guard else None
+        'deep_bear_ratio': deep_bear_guard.get('ratio', 0.97) if deep_bear_guard else None,
+        'last_action': last_action_event,
+        'last_trim': last_trim_event,
+        'sim_natural_lev': round(float(sim_L), 2)
     }
 
 def refresh_cache():

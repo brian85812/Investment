@@ -52,10 +52,29 @@ def send_push_notification(signals, rollover):
                 add_str = f"<code>&gt;{s['high_bw']:.2f}</code>"
             sub_str = "<code>已處底倉</code>" if s['step_idx'] == 0 else f"<code>&lt;{s['low_bw']:.2f}</code>"
 
+        la = s.get('last_action')
+        lt = s.get('last_trim')
+        la_str = (
+            f"{la['date']} ({'今日' if la['days_ago']==0 else str(la['days_ago'])+'日前'}) "
+            f"<code>{la['from_lev']:.2f}x ➔ {la['to_lev']:.2f}x</code> [{la['type']}]"
+            if la else "無"
+        )
+        lt_str = (
+            f"{lt['date']} ({'今日' if lt['days_ago']==0 else str(lt['days_ago'])+'日前'}) "
+            f"<code>{lt['from_lev']:.2f}x ➔ {lt['to_lev']:.2f}x</code> [{lt['type']}]"
+            if lt else "無"
+        )
+        hist_line = f"  🕒 上次調倉: {la_str}"
+        if lt and (not la or lt['date'] != la['date'] or lt['type'] != la['type']):
+            hist_line += f"\n  ✂️ 上次修剪: {lt_str}"
+        else:
+            hist_line = f"  ✂️ 上次調倉/修剪: {la_str}"
+
         lines.append(
             f"• <b>{s['name']}</b> ({s['date']})｜收盤 <code>{s['close']:.2f}</code>\n"
             f"  目標: {chg} (階梯 {s['step_idx']}/{s['max_steps']} · 修剪線 &gt;{s['trim_trigger_lev']:.2f}x)\n"
-            f"  加碼 {add_str} ｜ 減碼 {sub_str} ｜ 220MA <code>{s['sma_slow_val']:.2f}</code>"
+            f"  加碼 {add_str} ｜ 減碼 {sub_str} ｜ 220MA <code>{s['sma_slow_val']:.2f}</code>\n"
+            f"{hist_line}"
         )
     for k in ('tw', 'us'):
         ro = rollover.get(k, {})

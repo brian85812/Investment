@@ -145,6 +145,20 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? `${market.sma_bear_val.toFixed(1)} / ${c1Thresh}`
                         : '--';
 
+                    const fmtEvent = (evt) => {
+                        if (!evt) return '無紀錄';
+                        const dTag = evt.days_ago === 0 ? '今日' : `${evt.days_ago}日前`;
+                        return `${evt.date} (${dTag}) ${evt.from_lev.toFixed(2)}x➔${evt.to_lev.toFixed(2)}x [${evt.type}]`;
+                    };
+                    const lastActElem = clone.querySelector('.last-action-val');
+                    if (lastActElem) {
+                        lastActElem.textContent = fmtEvent(market.last_action);
+                    }
+                    const lastTrimElem = clone.querySelector('.last-trim-val');
+                    if (lastTrimElem) {
+                        lastTrimElem.textContent = fmtEvent(market.last_trim);
+                    }
+
                     clone.querySelector('.strategy-explanation').textContent = market.explanation;
 
                     // 實戰部位與 DCA 試算器 (含 localStorage 自動記憶)
