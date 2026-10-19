@@ -106,17 +106,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     // 2x2 技術防線矩陣
                     const highBwElem = clone.querySelector('.high-bw-val');
+                    const isD1Frozen = (market.ticker === 'QQQ') && market.in_trend && market.sma_bear_val && (market.sma_fast_val < market.sma_bear_val);
                     if (!market.in_trend) {
-                        highBwElem.textContent = `站上年線 > ${market.sma_slow_val.toFixed(2)}`;
-                        highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
+                        if (market.pre_bull_active) {
+                            highBwElem.textContent = `⚡ 季線總攻中 (守年線 >${market.sma_slow_val.toFixed(1)})`;
+                            highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
+                        } else if (market.sma_bear_val && market.close >= market.sma_bear_val && market.sma_fast_val >= market.sma_bear_val) {
+                            highBwElem.textContent = `⚡ E3b 總攻 > ${market.high_bw.toFixed(2)}`;
+                            highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
+                        } else {
+                            highBwElem.textContent = `站上年線 > ${market.sma_slow_val.toFixed(2)}`;
+                            highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
+                        }
                     } else if (market.ext_guard_active) {
                         highBwElem.textContent = `🌡️ 過熱封頂 ${extCapVal}x (>${market.high_bw.toFixed(1)})`;
                         highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
                     } else if (market.step_idx >= market.max_steps) {
                         highBwElem.textContent = `🔒 已達 ${market.max_leverage.toFixed(1)}x 滿載上限`;
                         highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
+                    } else if (isD1Frozen) {
+                        highBwElem.textContent = `🛡️ D1 凍結 (待 5MA ≥ ${market.sma_bear_val.toFixed(1)})`;
+                        highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
                     } else {
                         highBwElem.textContent = `> ${market.high_bw.toFixed(2)}`;
+                        highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                     }
 
                     const lowBwElem = clone.querySelector('.low-bw-val');

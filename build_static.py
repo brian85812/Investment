@@ -66,7 +66,7 @@ def send_push_notification(signals, rollover):
         "chat_id": chat_id,
         "text": "\n".join(lines),
         "parse_mode": "HTML",
-        "disable_notification": False
+        "disable_notification": (not urgent)
     }).encode("utf-8")
 
     try:
