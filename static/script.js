@@ -210,15 +210,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         let levCheck = '';
                         const diff = actualLev - targetToday;
-                        if (Math.abs(diff) < 0.01 && lastEdited === 'equity') {
+                        const prevTarget = market.target_yesterday !== undefined ? market.target_yesterday : targetToday;
+                        const isStepUp = (targetToday - prevTarget) > 0.005;
+                        const isStepDn = (prevTarget - targetToday) > 0.005;
+
+                        if (Math.abs(diff) < 0.01 && lastEdited === 'equity' && !isStepUp && !isStepDn) {
                             levCheck = `<div class="lev-check lev-ok">✅ 標準建倉：淨值 <strong>$${fmt(equity)}</strong> 對應 <strong>${targetToday.toFixed(2)}x</strong> 目標曝險為 <strong>$${fmt(targetPos)}</strong>。</div>`;
-                        } else if (actualLev < targetToday) {
-                            levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（低於目標 ${targetToday.toFixed(2)}x）— 自然衰退中，<strong>完全不動作</strong>，讓利潤奔跑。</div>`;
-                        } else if (actualLev <= trimLine) {
-                            levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（介於 ${targetToday.toFixed(2)}x ～ ${trimLine.toFixed(2)}x）— 落在 <strong>+0.15x 緩衝帶內</strong>，無須動作。</div>`;
+                        } else if (isStepUp) {
+                            if (actualLev < targetToday - 0.01) {
+                                const buyAmt = Math.round(targetPos - position);
+                                levCheck = `<div class="lev-check lev-danger">📈 <strong>【系統升檔加碼 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>今日目標上調！目前實際槓桿 <strong>${actualLev.toFixed(2)}x</strong> 低於新目標，請加買約 <strong>$${fmt(buyAmt)}</strong> 曝險補足至 <strong>${targetToday.toFixed(2)}x</strong>。</div>`;
+                            } else {
+                                levCheck = `<div class="lev-check lev-ok">✅ 今日系統升檔至 <strong>${targetToday.toFixed(2)}x</strong>，你目前實際槓桿為 <strong>${actualLev.toFixed(2)}x</strong>，已達標無須加買。</div>`;
+                            }
+                        } else if (isStepDn) {
+                            if (actualLev > targetToday + 0.01) {
+                                const sellAmt = Math.round(position - targetPos);
+                                levCheck = `<div class="lev-check lev-danger">📉 <strong>【系統降檔減碼 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>今日目標下調！（換檔日不適用 +0.15x 緩衝）請立即減持約 <strong>$${fmt(sellAmt)}</strong> 曝險，嚴格壓回新目標 <strong>${targetToday.toFixed(2)}x</strong>。</div>`;
+                            } else {
+                                levCheck = `<div class="lev-check lev-ok">✅ <strong>【系統降檔 · 自然衰退免動作】</strong>今日目標雖由 ${prevTarget.toFixed(2)}x 降至 <strong>${targetToday.toFixed(2)}x</strong>，但你目前實際槓桿 <strong>${actualLev.toFixed(2)}x</strong> 已低於新目標，依手冊鐵律<strong>完全不動作（嚴禁逆勢加買補倉）</strong>！</div>`;
+                            }
                         } else {
-                            const excessPos = Math.round(position - targetPos);
-                            levCheck = `<div class="lev-check lev-danger">🚨 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong> 突破修剪線 <strong>${trimLine.toFixed(2)}x</strong>（超標 +${diff.toFixed(2)}x）！<br>⚠️ <strong>須直接砍回目標 ${targetToday.toFixed(2)}x</strong>：請減持約 <strong>$${fmt(excessPos)}</strong> 曝險，或以本月 DCA 新資金自然稀釋。</div>`;
+                            // 今日系統目標槓桿未變 (維持原位階)
+                            if (actualLev < targetToday) {
+                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（低於目標 ${targetToday.toFixed(2)}x）— 自然衰退中，<strong>完全不動作</strong>，讓利潤奔跑。</div>`;
+                            } else if (actualLev <= trimLine) {
+                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong>（介於 ${targetToday.toFixed(2)}x ～ ${trimLine.toFixed(2)}x）— 落在 <strong>+0.15x 緩衝帶內</strong>，無須動作。</div>`;
+                            } else {
+                                const excessPos = Math.round(position - targetPos);
+                                levCheck = `<div class="lev-check lev-danger">🚨 實際槓桿 <strong>${actualLev.toFixed(2)}x</strong> 突破修剪線 <strong>${trimLine.toFixed(2)}x</strong>（超標 +${diff.toFixed(2)}x）！<br>⚠️ <strong>須直接砍回目標 ${targetToday.toFixed(2)}x</strong>：請減持約 <strong>$${fmt(excessPos)}</strong> 曝險，或以本月 DCA 新資金自然稀釋。</div>`;
+                            }
                         }
 
                         instructionDiv.innerHTML = levCheck;

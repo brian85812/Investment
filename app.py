@@ -67,9 +67,9 @@ ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
 def fetch_yahoo_direct(ticker):
-    """第 2 層防禦：直接發送 HTTP 請求向 Yahoo Chart API 抓取 5 年 K 棒"""
+    """第 2 層防禦：直接發送 HTTP 請求向 Yahoo Chart API 抓取 10 年 K 棒"""
     try:
-        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5y'
+        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=10y'
         req = urllib.request.Request(url, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
         })
@@ -119,13 +119,14 @@ def auto_patch_twse(ticker, df):
             data = json.loads(resp.read().decode('utf-8'))
             if 'data' not in data:
                 continue
+            max_date_str = df.index.max().strftime('%Y-%m-%d') if len(df) > 0 else ''
             for row in data['data']:
                 parts = row[0].split('/')
                 ad_year = int(parts[0]) + 1911
                 iso_date = f'{ad_year}-{parts[1]}-{parts[2]}'
                 
-                # 若 Yahoo 漏掉此交易日，自動以證交所官方收盤價補齊
-                if iso_date not in df_dates:
+                # 若 Yahoo 漏掉此交易日，且大於目前最新收盤日，自動以證交所官方收盤價補齊（防範歷史舊價除權息偏差）
+                if iso_date not in df_dates and (not max_date_str or iso_date > max_date_str):
                     try:
                         o = float(row[3].replace(',', ''))
                         h = float(row[4].replace(',', ''))
@@ -156,7 +157,7 @@ def fetch_robust_market_data(ticker):
     # 第 1 層：標準 yfinance
     for attempt in range(2):
         try:
-            df = yf.download(ticker, period='5y', progress=False, auto_adjust=True)
+            df = yf.download(ticker, period='10y', progress=False, auto_adjust=True)
             if df is not None and len(df) > 100:
                 print(f"✅ [Layer 1] yfinance 抓取成功 ({ticker})，共 {len(df)} 筆")
                 break
@@ -173,15 +174,21 @@ def fetch_robust_market_data(ticker):
         print(f"❌ {ticker} 所有外部連線均告急")
         return None
 
-    # 清理欄位格式
+    # 清理欄位格式與時間戳標準化
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
+    df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+    df = df[~df.index.duplicated(keep='last')].sort_index()
 
     # 第 3 層：台股向 TWSE 自動對帳補齊
     df = auto_patch_twse(ticker, df)
 
     # 執行已知手動補齊庫（雙重保險）
     df = apply_data_patches(ticker, df)
+
+    df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+    df = df[~df.index.duplicated(keep='last')].sort_index()
 
     # 針對最後一天即時報價 NaN 的容錯
     if len(df) > 0 and pd.isna(df['Close'].iloc[-1]):
@@ -245,8 +252,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
     ext_guard_active = False  # 追蹤最新一天是否觸發過熱冷卻
     bear_counter = 0
-    accel_active = False
-    accel_timer = 0
+    accel_left = 0
     below_ma_counter = 0
     pre_bull_on = False
 
@@ -267,16 +273,14 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         if sma_fast < sma_slow or below_ma_counter > grace_days:
             in_trend = False
             step_idx = 0
-            accel_active = False
-            accel_timer = 0
+            accel_left = 0
 
         # 2. 檢查是否滿足多頭重啟條件 (雙條件同時滿足)
         elif sma_fast >= sma_slow and current_close >= sma_slow and not in_trend:
             in_trend = True
             pre_bull_on = False
             if bull_acceleration and bull_acceleration.get('enable', True) and bear_counter >= bull_acceleration.get('min_bear_days', 40):
-                accel_active = True
-                accel_timer = 0
+                accel_left = bull_acceleration.get('accel_days', 252)
             bear_counter = 0
 
         # 3. 若處於防禦狀態 (not in_trend)，統一判定 C1 深熊減半、C1-A2 季線復原與 E3b 季線右側總攻
@@ -303,12 +307,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             is_deep = False
             pre_bull_on = False
             cur_base = base_leverage
-            if accel_active and bull_acceleration:
-                accel_timer += 1
+            if bull_acceleration and in_trend and accel_left > 0:
                 cur_base = bull_acceleration.get('accel_base', 1.2)
-                if accel_timer >= bull_acceleration.get('accel_days', 252):
-                    accel_active = False
-                    cur_base = base_leverage
+                accel_left -= 1
 
             req_bear = add_above_bear or (deep_bear_guard and deep_bear_guard.get('add_above_bear', False))
             if in_trend and (i - last_action_idx >= cooldown):
@@ -561,8 +562,8 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     )
 
     # === 附加狀態尾註（僅在牛初加速啟動時補充） ===
-    bull_accel_active = accel_active if bull_acceleration else False
-    bull_accel_days_left = max(0, bull_acceleration.get('accel_days', 252) - accel_timer) if (bull_acceleration and accel_active) else 0
+    bull_accel_active = (accel_left > 0) if bull_acceleration else False
+    bull_accel_days_left = accel_left if bull_acceleration else 0
     if bull_accel_active:
         explanation += f" 🚀【台股牛初加速生效中：底倉基準升為 {cur_base:.1f}x，剩餘 {bull_accel_days_left} 交易日】"
 
@@ -809,16 +810,16 @@ def compute_rollover_radar():
         us_phase = "watch"
         days_to_roll = (roll_week_start - today).days
         us_action = f"距 Roll Week 還有 {days_to_roll} 天，可開始留意跨季價差與年化溢價率。"
-    elif roll_week_start <= today < us_settlement:
+    elif us_days_left <= 1:
+        us_badge = "🚨 週五開盤結算 · 週四必轉"
+        us_class = "bear"
+        us_phase = "deadline"
+        us_action = "⚠️ 警告：NQ/MNQ 於週五 09:30 ET 美股開盤即停止交易結算！請務必於週四收盤前完成價差單轉倉！"
+    elif roll_week_start <= today:
         us_badge = "🎯 CME Roll Week"
         us_class = "bull"
         us_phase = "go"
-        us_action = f"次季量能已超越當季，建議使用【Calendar Spread】掛 Mid-Price 換約！"
-    else:
-        us_badge = "🚨 四巫日結算"
-        us_class = "bear"
-        us_phase = "deadline"
-        us_action = "今日到期結算！造市商抽單中，請立即以價差單完成轉倉！"
+        us_action = "次季量能已超越當季，建議使用【Calendar Spread】掛 Mid-Price 換約！"
 
     return {
         'tw': {
