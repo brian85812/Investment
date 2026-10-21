@@ -167,7 +167,13 @@ def run(markets, start, end=None, rule='current', band=0.15, trim=0.15,
         if len(names) > 1 and semi[i]:
             w_us = cap['US'] / total
             if w_us < 0.55 or w_us > 0.65:
-                cap['US'], cap['TW'] = total * 0.6, total * 0.4
+                for m, target_w in [('US', 0.6), ('TW', 0.4)]:
+                    new_cap = total * target_w
+                    delta_notional = abs(new_cap - cap[m]) * L[m]
+                    if delta_notional / total > 0.005:
+                        trades += 1
+                    turnover += delta_notional / total
+                    cap[m] = new_cap - delta_notional * cost
         recv = None
         if month_end[i] and cash > 0:
             total = sum(cap.values())
