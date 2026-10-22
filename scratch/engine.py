@@ -131,6 +131,13 @@ def run(markets, start, end=None, rule='current', band=0.15, trim=0.15,
     - semi_mode: 'adjust_notional', 'cash_only', 'manual_sop'
     - trim_lag: 0 (當日修剪), 1 (隔日修剪，僅 L > t 才減倉，反彈不加買)
     """
+    valid_rules = ('current', 'no_buy_down', 'legacy', 'symmetric', 'payday_full', 'daily')
+    if rule not in valid_rules:
+        raise ValueError(f"Unsupported rule: {rule}")
+    valid_semi = ('adjust_notional', 'cash_only', 'band_50_70', 'manual_sop', 'pure_drift', 'semi_sub_reb')
+    if semi_mode not in valid_semi:
+        raise ValueError(f"Unsupported semi_mode: {semi_mode}")
+
     names = list(markets)
     weights = weights or ({'US': 0.6, 'TW': 0.4} if len(names) == 2 else {m: 1.0 / len(names) for m in names})
     idx = pd.DatetimeIndex(sorted(set().union(*[markets[m][0].index for m in names])))
@@ -214,39 +221,51 @@ def run(markets, start, end=None, rule='current', band=0.15, trim=0.15,
             L[recv] = old_notional[recv] / cap[recv] if cap[recv] > 0 else 0.0
             flows[i] = cash
 
-        # Step 4: 換檔判定、修剪執行、DCA 新資金建倉與統一費用結算
+        # Step 4: 換檔判定、DCA 計畫部位預算出、修剪封頂與統一費用結算
         total_before_fee = sum(cap.values())
         new_notional = {}
         for m in names:
             t = T[m][i]
-            if rule == 'legacy':
+            if rule in ('legacy', 'daily', 'payday_full', 'symmetric'):
                 sig_reb = (last_t[m] is None) or (t != last_t[m])
-            else:
+                if rule == 'daily':
+                    sig_reb = True
+                elif rule == 'payday_full' and month_end[i]:
+                    sig_reb = True
+                elif rule == 'symmetric' and (L[m] < t - band):
+                    sig_reb = True
+            elif rule in ('current', 'no_buy_down'):
                 sig_reb = (last_t[m] is None) or (t > last_t[m]) or (t < last_t[m] and L[m] > t)
-
-            do_rebalance_to_t = False
-            if sig_reb:
-                do_rebalance_to_t = True
-                trim_pending[m] = False
-            elif trim_lag == 0:
-                if L[m] > t + trim:
-                    do_rebalance_to_t = True
-            else:  # trim_lag == 1
-                if trim_pending[m]:
-                    if L[m] > t:
-                        do_rebalance_to_t = True
-                    trim_pending[m] = False
-                if not do_rebalance_to_t and L[m] > t + trim:
-                    trim_pending[m] = True
-
-            if do_rebalance_to_t:
-                target_N = cap[m] * t
-            elif m == recv and cash > 0:
-                target_N = old_notional[m] + cash * t
             else:
-                target_N = cap[m] * L[m]
+                raise ValueError(f"Unsupported rule: {rule}")
 
-            new_notional[m] = target_N
+            # 先計算若不觸發修剪時的「初步計畫名目部位 planned_N」與「計畫槓桿 planned_L」
+            if sig_reb:
+                planned_N = cap[m] * t
+                trim_pending[m] = False
+            elif m == recv and cash > 0:
+                # 發薪日無換檔：初步計畫為「舊部位 + 新資金按目標 t 建倉」
+                planned_N = old_notional[m] + cash * t
+            else:
+                planned_N = cap[m] * L[m]
+
+            planned_L = planned_N / cap[m] if cap[m] > 0 else 0.0
+
+            # 接著對 planned_L 進行超標修剪判定 (徹底防止入金稀釋後又加買導致突破 t + trim！)
+            if not sig_reb:
+                if trim_lag == 0:
+                    if planned_L > t + trim:
+                        planned_N = cap[m] * t
+                else:  # trim_lag == 1 (隔日修剪 B3)
+                    if trim_pending[m]:
+                        if planned_L > t:
+                            planned_N = cap[m] * t
+                        trim_pending[m] = False
+                        planned_L = planned_N / cap[m] if cap[m] > 0 else 0.0
+                    if planned_L > t + trim:
+                        trim_pending[m] = True
+
+            new_notional[m] = planned_N
             last_t[m] = t
 
         if len(names) == 3 and 'US1' in names and 'US2' in names:

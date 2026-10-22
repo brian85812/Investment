@@ -30,7 +30,15 @@ from engine import US, TW, IRX, US_P, TW_P, target_lev
 
 def run_sim(markets, start, end=None, reb_rule='no_buy_down', trim=0.15,
             cash_drag_us=False, init=15e6, cash=0, cost=1e-4, weights=None,
-            semi_mode='adjust_notional', trim_lag=0):
+            semi_mode='adjust_notional', trim_lag=0, rule=None, band=0.15):
+    if rule is None:
+        rule = reb_rule
+    valid_rules = ('current', 'no_buy_down', 'legacy', 'symmetric', 'payday_full', 'daily')
+    if rule not in valid_rules:
+        raise ValueError(f"Unsupported rule: {rule}")
+    valid_semi = ('adjust_notional', 'cash_only', 'band_50_70', 'manual_sop', 'pure_drift', 'semi_sub_reb')
+    if semi_mode not in valid_semi:
+        raise ValueError(f"Unsupported semi_mode: {semi_mode}")
     """
     通用資產負債表撮合引擎：
     - reb_rule:
@@ -113,8 +121,8 @@ def run_sim(markets, start, end=None, reb_rule='no_buy_down', trim=0.15,
                         if semi_mode == 'cash_only':
                             L[m] = old_notional[m] / new_c if new_c > 0 else 0.0
                         cap[m] = new_c
-            elif semi_mode == 'manual_sop':
-                # 手冊SOP：僅在極端偏離 (<50% 或 >70%) 時才電匯硬再平衡拉回 60/40
+            elif semi_mode in ('manual_sop', 'band_50_70'):
+                # 手冊SOP/寬帶：僅在極端偏離 (<50% 或 >70%) 時才電匯硬再平衡拉回 60/40
                 if w_us < 0.50 or w_us > 0.70:
                     for m, tw in [('US', 0.6), ('TW', 0.4)]:
                         cap[m] = total * tw
@@ -147,43 +155,51 @@ def run_sim(markets, start, end=None, reb_rule='no_buy_down', trim=0.15,
             L[recv] = old_notional[recv] / cap[recv] if cap[recv] > 0 else 0.0
             flows[i] = cash
 
-        # Step 4: 換檔判定、修剪執行、DCA 新資金建倉與統一費用結算
+        # Step 4: 換檔判定、DCA 計畫部位預算出、修剪封頂與統一費用結算
         total_before_fee = sum(cap.values())
         new_notional = {}
         for m in names:
             t = T[m][i]
-            if reb_rule == 'legacy':
+            if rule in ('legacy', 'daily', 'payday_full', 'symmetric'):
                 sig_reb = (last_t[m] is None) or (t != last_t[m])
-            else:  # 'no_buy_down'
+                if rule == 'daily':
+                    sig_reb = True
+                elif rule == 'payday_full' and month_end[i]:
+                    sig_reb = True
+                elif rule == 'symmetric' and (L[m] < t - band):
+                    sig_reb = True
+            elif rule in ('current', 'no_buy_down'):
                 sig_reb = (last_t[m] is None) or (t > last_t[m]) or (t < last_t[m] and L[m] > t)
-
-            do_rebalance_to_t = False
-            if sig_reb:
-                do_rebalance_to_t = True
-                trim_pending[m] = False
-            elif trim_lag == 0:
-                if L[m] > t + trim:
-                    do_rebalance_to_t = True
-            else:  # trim_lag == 1 (隔日修剪 B3)
-                if trim_pending[m]:
-                    # 關鍵修復：隔日執行修剪時，唯有實際槓桿仍 > t 才減倉至 t，絕不可逆勢加買！
-                    if L[m] > t:
-                        do_rebalance_to_t = True
-                    trim_pending[m] = False
-                # 檢查今日收盤是否超標，若超標則標記明日修剪
-                if not do_rebalance_to_t and L[m] > t + trim:
-                    trim_pending[m] = True
-
-            if do_rebalance_to_t:
-                target_N = cap[m] * t
-            elif m == recv and cash > 0:
-                # 無換檔且無修剪之發薪日：舊部位不動 (old_notional[m])，僅新資金 cash 按目標槓桿 t 建倉
-                target_N = old_notional[m] + cash * t
             else:
-                # 維持原名目部位 (若今日有 cash_only 半年再平衡或無動作，名目部位維持 old_notional[m])
-                target_N = cap[m] * L[m]
+                raise ValueError(f"Unsupported rule: {rule}")
 
-            new_notional[m] = target_N
+            # 先計算若不觸發修剪時的「初步計畫名目部位 planned_N」與「計畫槓桿 planned_L」
+            if sig_reb:
+                planned_N = cap[m] * t
+                trim_pending[m] = False
+            elif m == recv and cash > 0:
+                # 發薪日無換檔：初步計畫為「舊部位 + 新資金按目標 t 建倉」
+                planned_N = old_notional[m] + cash * t
+            else:
+                planned_N = cap[m] * L[m]
+
+            planned_L = planned_N / cap[m] if cap[m] > 0 else 0.0
+
+            # 接著對 planned_L 進行超標修剪判定 (徹底防止入金稀釋後又加買導致突破 t + trim！)
+            if not sig_reb:
+                if trim_lag == 0:
+                    if planned_L > t + trim:
+                        planned_N = cap[m] * t
+                else:  # trim_lag == 1 (隔日修剪 B3)
+                    if trim_pending[m]:
+                        if planned_L > t:
+                            planned_N = cap[m] * t
+                        trim_pending[m] = False
+                        planned_L = planned_N / cap[m] if cap[m] > 0 else 0.0
+                    if planned_L > t + trim:
+                        trim_pending[m] = True
+
+            new_notional[m] = planned_N
             last_t[m] = t
 
         # 統一結算各市場 (或 Ensemble 淨額後) 之名目交易量、交易次數與手續費
@@ -275,9 +291,22 @@ def slice_metrics_bundle(twr, rf_series, total_trades_20y):
 # 第一部分：Round 0 可重現基準與敏感度核對 (含 Mode A/B/SOP, CashDrag, NextDayTrim)
 # ==============================================================================
 
+def run_synthetic_dca_trim_test():
+    # 合成測試：本金 100、目標 3.0x、跌 10% 使本金變 70 / 名目變 270、入金 20
+    cap_before, old_N, t, trim, cash = 70.0, 270.0, 3.0, 0.15, 20.0
+    cap_after = cap_before + cash  # 90.0
+    planned_N = old_N + cash * t   # 270 + 60 = 330.0 (未修剪前槓桿 3.667x > 3.15x)
+    planned_L = planned_N / cap_after
+    final_N = (cap_after * t) if planned_L > t + trim else planned_N  # 觸發修剪鎖定 270.0
+    final_L = final_N / cap_after  # 3.000x <= 3.15x
+    print(f"[合成單元測試] DCA 發薪日修剪封頂驗證: 入金前 L={old_N/cap_before:.3f}x, 計畫 L={planned_L:.3f}x, 最終 L={final_L:.3f}x (修剪封頂 <= {t+trim:.2f}x: {final_L <= t + trim})")
+
+
 def execute_round_0():
     print("\n" + "=" * 135)
-    print("【Round 0：固定可重現基準與會計/路徑敏感度核對 (含 Mode A/B/SOP、CashDrag 與 NextDayTrim)】")
+    print("【Round 0：固定可重現基準與會計/路徑敏感度核對 (含 Mode A/B/Band_50_70、CashDrag 與 NextDayTrim)】")
+    print("-" * 135)
+    run_synthetic_dca_trim_test()
     print("-" * 135)
 
     lu = target_lev(US, **US_P)
@@ -299,10 +328,10 @@ def execute_round_0():
     dca_b1_b = run_sim(mk, '2013-01-01', reb_rule='no_buy_down', semi_mode='cash_only', trim_lag=0, cash_drag_us=False, init=15e6, cash=200e3)['pv'].iloc[-1] / 1e8
     h1_b1_b, h2_b1_b, y20_b1_b = slice_metrics_bundle(r_b1_b['twr'], IRX, r_b1_b['trades'])
 
-    # 4. B1_ModeSOP (手冊SOP：平時新資金單向引流，僅極端偏離 <50% 或 >70% 才電匯)
-    r_b1_sop = run_sim(mk, '2006-01-01', reb_rule='no_buy_down', semi_mode='manual_sop', trim_lag=0, cash_drag_us=False, cash=0)
-    dca_b1_sop = run_sim(mk, '2013-01-01', reb_rule='no_buy_down', semi_mode='manual_sop', trim_lag=0, cash_drag_us=False, init=15e6, cash=200e3)['pv'].iloc[-1] / 1e8
-    h1_b1_sop, h2_b1_sop, y20_b1_sop = slice_metrics_bundle(r_b1_sop['twr'], IRX, r_b1_sop['trades'])
+    # 4. B1_Band_50_70 (50%~70% 寬帶再平衡模型)
+    r_b1_band = run_sim(mk, '2006-01-01', reb_rule='no_buy_down', semi_mode='band_50_70', trim_lag=0, cash_drag_us=False, cash=0)
+    dca_b1_band = run_sim(mk, '2013-01-01', reb_rule='no_buy_down', semi_mode='band_50_70', trim_lag=0, cash_drag_us=False, init=15e6, cash=200e3)['pv'].iloc[-1] / 1e8
+    h1_b1_band, h2_b1_band, y20_b1_band = slice_metrics_bundle(r_b1_band['twr'], IRX, r_b1_band['trades'])
 
     # 5. B2_CashDrag (美股期貨保證金 40% 純現金不計息折價)
     r_b2 = run_sim(mk, '2006-01-01', reb_rule='no_buy_down', semi_mode='adjust_notional', trim_lag=0, cash_drag_us=True, cash=0)
@@ -345,13 +374,15 @@ def execute_round_0():
     print(row_str("B0_Legacy", h1_b0, h2_b0, y20_b0, dca_b0))
     print(row_str("B1_ModeA", h1_b1_a, h2_b1_a, y20_b1_a, dca_b1_a))
     print(row_str("B1_ModeB_CashOnly", h1_b1_b, h2_b1_b, y20_b1_b, dca_b1_b))
-    print(row_str("B1_ModeSOP", h1_b1_sop, h2_b1_sop, y20_b1_sop, dca_b1_sop))
+    print(row_str("B1_Band_50_70", h1_b1_band, h2_b1_band, y20_b1_band, dca_b1_band))
     print(row_str("B2_CashDrag", h1_b2, h2_b2, y20_b2, dca_b2))
     print(row_str("B3_NextDayTrim", h1_b3, h2_b3, y20_b3, dca_b3))
     print("-" * 135)
     print(f"Path_Check (10Y起算 vs 2003起算在 2023-2026 狀態收斂檢驗):")
     print(f"  - 美股 QQQ  不一致天數 (mismatch_days): {mismatch_us} 天 (100% 狀態收斂)")
     print(f"  - 台股 006208 不一致天數 (mismatch_days): {mismatch_tw} 天 (100% 狀態收斂)")
+    print("-" * 135)
+    print("註記：在 cash=0 下 B1_Band_50_70 衡量的是將再平衡容忍帶放寬至 50%～70% 的效果，而非新現金流引流效果；在 2013 DCA (cash=20萬/月) 欄則同時包含每月新現金流優先補落後方 + 50%～70% 寬帶效果。")
     print("=" * 135)
 
     return r_b1_a
@@ -472,8 +503,9 @@ def target_lev_c1_c2(
 
 def find_divergence_episodes(lev_alt, lev_base, price_series, rf_val, sp_val, start='2006-01-01'):
     """
-    使用單市場完整 run_sim 真實主淨值曲線與持倉槓桿 (納入 hold_end_dt 與收斂日 reconv_dt)，
-    計算每個分歧事件的真實持倉淨值變化、超額累積報酬與完整漂移收斂天數
+    使用單市場完整 run_sim 真實主淨值曲線與持倉槓桿，
+    先找出所有訊號分歧事件及其持倉收斂日 reconv_dt，
+    並將起點 s_dt 早於前一事件收斂日 reconv_dt 的重疊事件合併為獨立的持倉分歧週期 (Cluster)。
     """
     lev_alt_slice = lev_alt.loc[start:]
     lev_base_slice = lev_base.loc[start:]
@@ -489,26 +521,16 @@ def find_divergence_episodes(lev_alt, lev_base, price_series, rf_val, sp_val, st
     lev_base_curve = r_base['lev']
     p = price_series['Close']
 
-    episodes = []
     full_idx = twr_alt.index
     n_days = len(full_idx)
 
+    raw_episodes = []
     for s_dt, e_dt in zip(st_dates, en_dates):
         s_pos = full_idx.get_loc(s_dt)
         e_pos = full_idx.get_loc(e_dt)
         prev_dt = full_idx[s_pos - 1] if s_pos > 0 else s_dt
         hold_end_dt = full_idx[e_pos + 1] if (e_pos + 1 < n_days) else e_dt
 
-        mean_lev_alt = lev_alt_curve.loc[s_dt:e_dt].mean()
-        mean_lev_base = lev_base_curve.loc[s_dt:e_dt].mean()
-        days = len(lev_alt_curve.loc[s_dt:e_dt])
-
-        idx_ret = (p.loc[hold_end_dt] / p.loc[prev_dt] - 1.0) if (prev_dt in p.index and hold_end_dt in p.index) else 0.0
-        ret_alt_hold = (twr_alt.loc[hold_end_dt] / twr_alt.loc[prev_dt] - 1.0)
-        ret_base_hold = (twr_base.loc[hold_end_dt] / twr_base.loc[prev_dt] - 1.0)
-        sig_win_diff = ret_alt_hold - ret_base_hold
-
-        # 往後搜尋直到實際持倉槓桿收斂之日 (abs <= 0.005)
         reconv_pos = e_pos + 1
         while reconv_pos < n_days:
             if abs(lev_alt_curve.iloc[reconv_pos] - lev_base_curve.iloc[reconv_pos]) <= 0.005:
@@ -517,17 +539,83 @@ def find_divergence_episodes(lev_alt, lev_base, price_series, rf_val, sp_val, st
         if reconv_pos >= n_days:
             reconv_pos = n_days - 1
         reconv_dt = full_idx[reconv_pos]
-        drift_days = reconv_pos - (e_pos + 1)
 
+        raw_episodes.append({
+            's_dt': s_dt,
+            'e_dt': e_dt,
+            'prev_dt': prev_dt,
+            'hold_end_dt': hold_end_dt,
+            'reconv_dt': reconv_dt,
+            'reconv_pos': reconv_pos
+        })
+
+    if not raw_episodes:
+        return []
+
+    # 合併重疊漂移窗口為獨立 Cluster (若 s_dt <= 前一 Cluster 的 reconv_dt 則合併)
+    clusters = []
+    for ep in raw_episodes:
+        if not clusters:
+            clusters.append({
+                'start_dt': ep['s_dt'],
+                'end_dt': ep['e_dt'],
+                'prev_dt': ep['prev_dt'],
+                'hold_end_dt': ep['hold_end_dt'],
+                'reconv_dt': ep['reconv_dt'],
+                'reconv_pos': ep['reconv_pos'],
+                'sig_events': 1,
+            })
+        else:
+            prev = clusters[-1]
+            if ep['s_dt'] <= prev['reconv_dt']:
+                prev['sig_events'] += 1
+                if ep['e_dt'] > prev['end_dt']:
+                    prev['end_dt'] = ep['e_dt']
+                if ep['hold_end_dt'] > prev['hold_end_dt']:
+                    prev['hold_end_dt'] = ep['hold_end_dt']
+                if ep['reconv_dt'] > prev['reconv_dt']:
+                    prev['reconv_dt'] = ep['reconv_dt']
+                    prev['reconv_pos'] = ep['reconv_pos']
+            else:
+                clusters.append({
+                    'start_dt': ep['s_dt'],
+                    'end_dt': ep['e_dt'],
+                    'prev_dt': ep['prev_dt'],
+                    'hold_end_dt': ep['hold_end_dt'],
+                    'reconv_dt': ep['reconv_dt'],
+                    'reconv_pos': ep['reconv_pos'],
+                    'sig_events': 1,
+                })
+
+    out_list = []
+    for cl in clusters:
+        s_dt = cl['start_dt']
+        e_dt = cl['end_dt']
+        prev_dt = cl['prev_dt']
+        hold_end_dt = cl['hold_end_dt']
+        reconv_dt = cl['reconv_dt']
+        reconv_pos = cl['reconv_pos']
+
+        days = len(lev_alt_curve.loc[s_dt:e_dt])
+        mean_lev_alt = lev_alt_curve.loc[s_dt:e_dt].mean()
+        mean_lev_base = lev_base_curve.loc[s_dt:e_dt].mean()
+
+        idx_ret = (p.loc[hold_end_dt] / p.loc[prev_dt] - 1.0) if (prev_dt in p.index and hold_end_dt in p.index) else 0.0
+        ret_alt_hold = (twr_alt.loc[hold_end_dt] / twr_alt.loc[prev_dt] - 1.0)
+        ret_base_hold = (twr_base.loc[hold_end_dt] / twr_base.loc[prev_dt] - 1.0)
+        sig_win_diff = ret_alt_hold - ret_base_hold
+
+        drift_days = reconv_pos - full_idx.get_loc(hold_end_dt)
         ret_alt_full = (twr_alt.loc[reconv_dt] / twr_alt.loc[prev_dt] - 1.0)
         ret_base_full = (twr_base.loc[reconv_dt] / twr_base.loc[prev_dt] - 1.0)
         full_drift_diff = ret_alt_full - ret_base_full
 
-        episodes.append({
+        out_list.append({
             'start': s_dt.strftime('%Y-%m-%d'),
             'end': e_dt.strftime('%Y-%m-%d'),
             'hold_end': hold_end_dt.strftime('%Y-%m-%d'),
             'days': days,
+            'sig_events': cl['sig_events'],
             'mean_lev_alt': mean_lev_alt,
             'mean_lev_base': mean_lev_base,
             'idx_ret': idx_ret,
@@ -536,7 +624,8 @@ def find_divergence_episodes(lev_alt, lev_base, price_series, rf_val, sp_val, st
             'drift_days': drift_days,
             'full_drift_diff': full_drift_diff
         })
-    return episodes
+
+    return out_list
 
 
 def execute_round_1():
@@ -611,33 +700,33 @@ def execute_round_1():
     if not c1_episodes:
         print("  無任何分歧事件。")
     else:
-        print(f"  {'起訖日期 (含hold_end)':<32} {'天數':<5} {'C1持倉均L':<9} {'C0持倉均L':<9} {'指數漲跌':<9} {'訊號期淨值差':<12} {'收斂日':<11} {'漂移':<5} {'完整收斂淨值差':<14}")
-        print("  " + "-" * 115)
+        print(f"  {'初次分歧~收斂日 (含hold_end)':<34} {'分歧次數':<8} {'天數':<5} {'C1持倉均L':<9} {'C0持倉均L':<9} {'指數漲跌':<9} {'訊號期淨值差':<12} {'收斂日':<11} {'漂移':<5} {'完整收斂淨值差':<14}")
+        print("  " + "-" * 125)
         for ep in c1_episodes:
             range_str = f"{ep['start']} ~ {ep['hold_end']}"
-            print(f"  {range_str:<32} {ep['days']:<5d} {ep['mean_lev_alt']:<9.2f} {ep['mean_lev_base']:<9.2f} {ep['idx_ret']*100:+7.2f}%   {ep['sig_win_diff']*100:+10.2f}%   {ep['reconv_dt']:<11} {ep['drift_days']:<5d} {ep['full_drift_diff']*100:+12.2f}%")
+            print(f"  {range_str:<34} {ep['sig_events']:<8d} {ep['days']:<5d} {ep['mean_lev_alt']:<9.2f} {ep['mean_lev_base']:<9.2f} {ep['idx_ret']*100:+7.2f}%   {ep['sig_win_diff']*100:+10.2f}%   {ep['reconv_dt']:<11} {ep['drift_days']:<5d} {ep['full_drift_diff']*100:+12.2f}%")
 
     print("\n【C2 vs C0 美股 E3b 季線總攻歷史分歧事件清單 (含 hold_end 與實際槓桿收斂)】")
     c2_us_episodes = find_divergence_episodes(l_c2_us, l_c0_us, US, IRX, 0.003)
     if not c2_us_episodes:
         print("  無任何分歧事件。")
     else:
-        print(f"  {'起訖日期 (含hold_end)':<32} {'天數':<5} {'C2持倉均L':<9} {'C0持倉均L':<9} {'指數漲跌':<9} {'訊號期淨值差':<12} {'收斂日':<11} {'漂移':<5} {'完整收斂淨值差':<14}")
-        print("  " + "-" * 115)
+        print(f"  {'初次分歧~收斂日 (含hold_end)':<34} {'分歧次數':<8} {'天數':<5} {'C2持倉均L':<9} {'C0持倉均L':<9} {'指數漲跌':<9} {'訊號期淨值差':<12} {'收斂日':<11} {'漂移':<5} {'完整收斂淨值差':<14}")
+        print("  " + "-" * 125)
         for ep in c2_us_episodes:
             range_str = f"{ep['start']} ~ {ep['hold_end']}"
-            print(f"  {range_str:<32} {ep['days']:<5d} {ep['mean_lev_alt']:<9.2f} {ep['mean_lev_base']:<9.2f} {ep['idx_ret']*100:+7.2f}%   {ep['sig_win_diff']*100:+10.2f}%   {ep['reconv_dt']:<11} {ep['drift_days']:<5d} {ep['full_drift_diff']*100:+12.2f}%")
+            print(f"  {range_str:<34} {ep['sig_events']:<8d} {ep['days']:<5d} {ep['mean_lev_alt']:<9.2f} {ep['mean_lev_base']:<9.2f} {ep['idx_ret']*100:+7.2f}%   {ep['sig_win_diff']*100:+10.2f}%   {ep['reconv_dt']:<11} {ep['drift_days']:<5d} {ep['full_drift_diff']*100:+12.2f}%")
 
     print("\n【C2 vs C0 台股 E3b 季線總攻歷史分歧事件清單 (含 hold_end 與實際槓桿收斂)】")
     c2_tw_episodes = find_divergence_episodes(l_c2_tw, l_c0_tw, TW, 0.013, 0.005)
     if not c2_tw_episodes:
         print("  無任何分歧事件。")
     else:
-        print(f"  {'起訖日期 (含hold_end)':<32} {'天數':<5} {'C2持倉均L':<9} {'C0持倉均L':<9} {'指數漲跌':<9} {'訊號期淨值差':<12} {'收斂日':<11} {'漂移':<5} {'完整收斂淨值差':<14}")
-        print("  " + "-" * 115)
+        print(f"  {'初次分歧~收斂日 (含hold_end)':<34} {'分歧次數':<8} {'天數':<5} {'C2持倉均L':<9} {'C0持倉均L':<9} {'指數漲跌':<9} {'訊號期淨值差':<12} {'收斂日':<11} {'漂移':<5} {'完整收斂淨值差':<14}")
+        print("  " + "-" * 125)
         for ep in c2_tw_episodes:
             range_str = f"{ep['start']} ~ {ep['hold_end']}"
-            print(f"  {range_str:<32} {ep['days']:<5d} {ep['mean_lev_alt']:<9.2f} {ep['mean_lev_base']:<9.2f} {ep['idx_ret']*100:+7.2f}%   {ep['sig_win_diff']*100:+10.2f}%   {ep['reconv_dt']:<11} {ep['drift_days']:<5d} {ep['full_drift_diff']*100:+12.2f}%")
+            print(f"  {range_str:<34} {ep['sig_events']:<8d} {ep['days']:<5d} {ep['mean_lev_alt']:<9.2f} {ep['mean_lev_base']:<9.2f} {ep['idx_ret']*100:+7.2f}%   {ep['sig_win_diff']*100:+10.2f}%   {ep['reconv_dt']:<11} {ep['drift_days']:<5d} {ep['full_drift_diff']*100:+12.2f}%")
     print("=" * 145)
 
 
@@ -893,7 +982,10 @@ def execute_round_3():
 
         print(f"  - Block Size = {block_len:2d} 日: ΔSharpe 中位數 = {ci_med:+6.3f} ｜ 95% CI = [{ci_low:+6.3f}, {ci_high:+6.3f}] ｜ P(ΔSharpe <= 0) = {p_val*100:4.1f}%")
 
-    print("\n【統計定論】E1c 階梯帶來的 +0.89%/年 增益定義為「樣本內 CAGR 差值」；因 Bootstrap ΔSharpe 95% CI 跨零，統計上無法證明夏普率顯著改善，但其提供了實質且穩定的幾何複合年化增益。")
+    cagr_scheme_c = df_res[df_res['name'] == '(1,1,1,1,1)']['y20_cagr'].iloc[0]
+    cagr_no_e1c = df_res[df_res['name'] == '(1,1,0,1,1)']['y20_cagr'].iloc[0]
+    diff_e1c = cagr_scheme_c - cagr_no_e1c
+    print(f"\n【統計定論】E1c 階梯帶來的 +{diff_e1c*100:.2f}%/年 為樣本內 CAGR 差值；因 Bootstrap ΔSharpe 95% CI 跨零，統計上尚無足夠證據判定夏普率改善，亦不得直接外推為保證之未來超額報酬。")
     print("=" * 135)
 
 
