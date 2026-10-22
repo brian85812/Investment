@@ -123,17 +123,16 @@ def build_markets(us_p=None, tw_p=None):
             'TW': (TW, target_lev(TW, **tw_p), 0.013, 0.005)}
 
 def run(markets, start, end=None, rule='current', band=0.15, trim=0.15,
-        init=15e6, cash=200e3, cost=1e-4, weights=None):
+        init=15e6, cash=200e3, cost=1e-4, weights=None,
+        semi_mode='adjust_notional', trim_lag=0, cash_drag_us=False):
     """
-    rule:
-      current     = 位階改變才動 + 超過 目標+trim 修剪 + 新資金開目標 (舊部位不補)
-      symmetric   = current + 低於 目標-band 補回目標
-      payday_full = current + 每月最後交易日把全部拉回目標
-      daily       = 每天拉回目標 (參考上限)
-    回傳 dict: pv, twr, lev, trades(實際調倉次數), turnover(累積調倉名目/資本)
+    統一資產負債表撮合引擎：
+    - rule: 'current' (no_buy_down), 'legacy'
+    - semi_mode: 'adjust_notional', 'cash_only', 'manual_sop'
+    - trim_lag: 0 (當日修剪), 1 (隔日修剪，僅 L > t 才減倉，反彈不加買)
     """
     names = list(markets)
-    weights = weights or {'US': 0.6, 'TW': 0.4}
+    weights = weights or ({'US': 0.6, 'TW': 0.4} if len(names) == 2 else {m: 1.0 / len(names) for m in names})
     idx = pd.DatetimeIndex(sorted(set().union(*[markets[m][0].index for m in names])))
     idx = idx[idx >= pd.Timestamp(start)]
     if end:
@@ -152,60 +151,135 @@ def run(markets, start, end=None, rule='current', band=0.15, trim=0.15,
     cap = {m: init * weights[m] for m in names}
     L = {m: 0.0 for m in names}
     last_t = {m: None for m in names}
+    trim_pending = {m: False for m in names}
     pv = np.zeros(len(idx)); flows = np.zeros(len(idx)); levs = np.zeros(len(idx))
     trades, turnover = 0, 0.0
+
     for i in range(len(idx)):
+        # Step 1: 每日損益結算與自然漂移
         for m in names:
             sp = markets[m][3]
-            rf_d = R[m][i] * gaps[i] / 365
-            sp_d = sp * gaps[i] / 365
+            rf_d = R[m][i] * gaps[i] / 365.0
+            sp_d = sp * gaps[i] / 365.0
             r = P[m][i]
-            net = rf_d + L[m] * (r - rf_d - sp_d)
-            cap[m] *= (1 + net)
-            L[m] = L[m] * (1 + r) / (1 + net) if (1 + net) > 0 else 0
+            rf_earn = (0.60 * rf_d) if (cash_drag_us and 'US' in m) else rf_d
+            net = rf_earn + L[m] * (r - rf_d - sp_d)
+            cap[m] *= (1.0 + net)
+            L[m] = L[m] * (1.0 + r) / (1.0 + net) if (1.0 + net) > 0 else 0.0
+
+        # ★ 關鍵：在任何本金移轉 (半年再平衡) 與新資金注入 (DCA) 之前，先鎖定各市場當日收盤的「真實舊名目部位」
+        old_notional = {m: cap[m] * L[m] for m in names}
         total = sum(cap.values())
-        if len(names) > 1 and semi[i]:
-            w_us = cap['US'] / total
-            if w_us < 0.55 or w_us > 0.65:
-                for m, target_w in [('US', 0.6), ('TW', 0.4)]:
-                    new_cap = total * target_w
-                    delta_notional = abs(new_cap - cap[m]) * L[m]
-                    if delta_notional / total > 0.005:
-                        trades += 1
-                    turnover += delta_notional / total
-                    cap[m] = new_cap - delta_notional * cost
+
+        # Step 2: 半年再平衡 (1月/7月初)
+        if len(names) == 2 and semi[i]:
+            w_us = cap['US'] / total if total > 0 else 0.6
+            if semi_mode in ('adjust_notional', 'cash_only'):
+                if w_us < 0.55 or w_us > 0.65:
+                    for m, tw in [('US', 0.6), ('TW', 0.4)]:
+                        new_c = total * tw
+                        if semi_mode == 'cash_only':
+                            L[m] = old_notional[m] / new_c if new_c > 0 else 0.0
+                        cap[m] = new_c
+            elif semi_mode == 'manual_sop':
+                if w_us < 0.50 or w_us > 0.70:
+                    for m, tw in [('US', 0.6), ('TW', 0.4)]:
+                        cap[m] = total * tw
+        elif len(names) == 3 and semi[i]:
+            w_us1 = cap['US1'] / total if total > 0 else 0.3
+            w_us2 = cap['US2'] / total if total > 0 else 0.3
+            w_us = w_us1 + w_us2
+            if semi_mode == 'pure_drift':
+                if w_us < 0.55 or w_us > 0.65:
+                    ratio = (total * 0.6) / (cap['US1'] + cap['US2']) if (cap['US1'] + cap['US2']) > 0 else 0.0
+                    cap['US1'] *= ratio
+                    cap['US2'] *= ratio
+                    cap['TW'] = total * 0.4
+            elif semi_mode in ('adjust_notional', 'semi_sub_reb'):
+                if w_us < 0.55 or w_us > 0.65 or abs(w_us1 - w_us2) > 0.05:
+                    cap['US1'] = total * 0.3
+                    cap['US2'] = total * 0.3
+                    cap['TW'] = total * 0.4
+
+        # Step 3: 月底新資金流分配 (DCA)
         recv = None
         if month_end[i] and cash > 0:
             total = sum(cap.values())
-            recv = 'US' if cap['US'] / total < weights['US'] else 'TW'
+            if len(names) == 2:
+                recv = 'US' if (cap['US'] / total < weights['US']) else 'TW'
+            else:
+                ratios = {m: cap[m] / (total * weights[m]) for m in names}
+                recv = min(ratios, key=ratios.get)
             cap[recv] += cash
+            L[recv] = old_notional[recv] / cap[recv] if cap[recv] > 0 else 0.0
             flows[i] = cash
-        total_before = sum(cap.values())
+
+        # Step 4: 換檔判定、修剪執行、DCA 新資金建倉與統一費用結算
+        total_before_fee = sum(cap.values())
+        new_notional = {}
         for m in names:
             t = T[m][i]
-            reb = (last_t[m] is None) or (t != last_t[m])
-            if L[m] > t + trim:
-                reb = True
-            if rule == 'symmetric' and L[m] < t - band:
-                reb = True
-            if rule == 'payday_full' and month_end[i]:
-                reb = True
-            if rule == 'daily':
-                reb = True
-            if m == recv and not reb and cap[m] > 0:
-                L[m] = ((cap[m] - cash) * L[m] + cash * t) / cap[m]
-                turnover += cash * t / total_before
-            if reb:
-                diff = abs(L[m] - t)
-                if diff > 0.005:
-                    trades += 1
-                turnover += cap[m] * diff / total_before
-                cap[m] -= cap[m] * diff * cost
-                L[m] = t
+            if rule == 'legacy':
+                sig_reb = (last_t[m] is None) or (t != last_t[m])
+            else:
+                sig_reb = (last_t[m] is None) or (t > last_t[m]) or (t < last_t[m] and L[m] > t)
+
+            do_rebalance_to_t = False
+            if sig_reb:
+                do_rebalance_to_t = True
+                trim_pending[m] = False
+            elif trim_lag == 0:
+                if L[m] > t + trim:
+                    do_rebalance_to_t = True
+            else:  # trim_lag == 1
+                if trim_pending[m]:
+                    if L[m] > t:
+                        do_rebalance_to_t = True
+                    trim_pending[m] = False
+                if not do_rebalance_to_t and L[m] > t + trim:
+                    trim_pending[m] = True
+
+            if do_rebalance_to_t:
+                target_N = cap[m] * t
+            elif m == recv and cash > 0:
+                target_N = old_notional[m] + cash * t
+            else:
+                target_N = cap[m] * L[m]
+
+            new_notional[m] = target_N
             last_t[m] = t
+
+        if len(names) == 3 and 'US1' in names and 'US2' in names:
+            delta_us = abs((new_notional['US1'] + new_notional['US2']) - (old_notional['US1'] + old_notional['US2']))
+            if total_before_fee > 0 and (delta_us / total_before_fee) > 0.005:
+                trades += 1
+            turnover += delta_us / total_before_fee if total_before_fee > 0 else 0.0
+            fee_us = delta_us * cost
+            cap_us_tot = cap['US1'] + cap['US2']
+            for um in ('US1', 'US2'):
+                w_sub = cap[um] / cap_us_tot if cap_us_tot > 0 else 0.5
+                cap[um] -= fee_us * w_sub
+                L[um] = new_notional[um] / cap[um] if cap[um] > 0 else 0.0
+
+            delta_tw = abs(new_notional['TW'] - old_notional['TW'])
+            if total_before_fee > 0 and (delta_tw / total_before_fee) > 0.005:
+                trades += 1
+            turnover += delta_tw / total_before_fee if total_before_fee > 0 else 0.0
+            cap['TW'] -= delta_tw * cost
+            L['TW'] = new_notional['TW'] / cap['TW'] if cap['TW'] > 0 else 0.0
+        else:
+            for m in names:
+                delta_n = abs(new_notional[m] - old_notional[m])
+                if total_before_fee > 0 and (delta_n / total_before_fee) > 0.005:
+                    trades += 1
+                turnover += delta_n / total_before_fee if total_before_fee > 0 else 0.0
+                cap[m] -= delta_n * cost
+                L[m] = new_notional[m] / cap[m] if cap[m] > 0 else 0.0
+
         total = sum(cap.values())
         pv[i] = total
         levs[i] = sum(cap[m] * L[m] for m in names) / total if total > 0 else 0
+
     pv = pd.Series(pv, index=idx)
     dr = (pv - flows) / pv.shift(1) - 1
     dr.iloc[0] = 0
