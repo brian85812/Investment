@@ -122,9 +122,11 @@ def build_markets(us_p=None, tw_p=None):
     return {'US': (US, target_lev(US, **us_p), IRX, 0.003),
             'TW': (TW, target_lev(TW, **tw_p), 0.013, 0.005)}
 
-def run(markets, start, end=None, rule='current', band=0.15, trim=0.15,
-        init=15e6, cash=200e3, cost=1e-4, weights=None,
-        semi_mode='adjust_notional', trim_lag=0, cash_drag_us=False):
+def run(markets, start, end=None, rule='current', reb_rule=None, band=0.15, trim=0.15,
+        cash_drag_us=False, init=15e6, cash=0, cost=1e-4, weights=None,
+        semi_mode='adjust_notional', trim_lag=0):
+    if reb_rule is not None:
+        rule = reb_rule
     """
     統一資產負債表撮合引擎：
     - rule: 'current' (no_buy_down), 'legacy'
@@ -188,7 +190,7 @@ def run(markets, start, end=None, rule='current', band=0.15, trim=0.15,
                         if semi_mode == 'cash_only':
                             L[m] = old_notional[m] / new_c if new_c > 0 else 0.0
                         cap[m] = new_c
-            elif semi_mode == 'manual_sop':
+            elif semi_mode in ('manual_sop', 'band_50_70'):
                 if w_us < 0.50 or w_us > 0.70:
                     for m, tw in [('US', 0.6), ('TW', 0.4)]:
                         cap[m] = total * tw

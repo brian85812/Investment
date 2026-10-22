@@ -22,224 +22,15 @@ import pandas as pd
 import yfinance as yf
 
 # 匯入黃金引擎數據與標準參數
-from engine import US, TW, IRX, US_P, TW_P, target_lev
+from engine import US, TW, IRX, US_P, TW_P, target_lev, run as engine_run
 
 # ==============================================================================
 # 通用輔助函式：自訂撮合引擎 run_sim 與指標計算 calc_metrics
 # ==============================================================================
 
-def run_sim(markets, start, end=None, reb_rule='no_buy_down', trim=0.15,
-            cash_drag_us=False, init=15e6, cash=0, cost=1e-4, weights=None,
-            semi_mode='adjust_notional', trim_lag=0, rule=None, band=0.15):
-    if rule is None:
-        rule = reb_rule
-    valid_rules = ('current', 'no_buy_down', 'legacy', 'symmetric', 'payday_full', 'daily')
-    if rule not in valid_rules:
-        raise ValueError(f"Unsupported rule: {rule}")
-    valid_semi = ('adjust_notional', 'cash_only', 'band_50_70', 'manual_sop', 'pure_drift', 'semi_sub_reb')
-    if semi_mode not in valid_semi:
-        raise ValueError(f"Unsupported semi_mode: {semi_mode}")
-    """
-    通用資產負債表撮合引擎：
-    - reb_rule:
-        'legacy': (last_t is None) or (t != last_t)
-        'no_buy_down': (last_t is None) or (t > last_t) or (t < last_t and L > t)
-    - cash_drag_us: 若為 True，美股期貨保證金純現金 (40%) 不計息，僅 60% 生息
-    - weights: 自訂各市場權重 (如 60/40 或 30/30/40 或單市場 100%)
-    - semi_mode:
-        'adjust_notional' (Mode A): 調整本金並維持 L_m，名目改變由 Step 4 自動結算調倉與費用
-        'cash_only' (Mode B): 純現金轉移，期貨口數不動，反推 L_m，零交易成本
-        'manual_sop': 對齊手冊 SOP，僅極端偏離 (<50% 或 >70%) 才調整本金
-        'pure_drift': Ensemble 專用，整體 US 偏離 55%~65% 時等比例縮放 US1/US2
-        'semi_sub_reb': Ensemble 專用，半年強制將 US1/US2/TW 恢復至 30/30/40
-    - trim_lag:
-        0: 即日收盤超標修剪 (Same-day Close Trim)
-        1: 次日收盤超標修剪 (Next-day Close Trim，僅當實際槓桿仍 > t 時才減倉，反彈不加買)
-    """
-    names = list(markets)
-    if weights is None:
-        if len(names) == 2:
-            weights = {'US': 0.6, 'TW': 0.4}
-        elif len(names) == 3:
-            weights = {'US1': 0.3, 'US2': 0.3, 'TW': 0.4}
-        else:
-            weights = {m: 1.0 / len(names) for m in names}
-
-    idx = pd.DatetimeIndex(sorted(set().union(*[markets[m][0].index for m in names])))
-    idx = idx[idx >= pd.Timestamp(start)]
-    if end:
-        idx = idx[idx <= pd.Timestamp(end)]
-
-    P, T, R = {}, {}, {}
-    for m in names:
-        px, tl, rf, sp = markets[m]
-        P[m] = px['Close'].reindex(idx.union(px.index)).ffill().reindex(idx).pct_change().fillna(0).values
-        T[m] = tl.reindex(idx.union(tl.index)).ffill().reindex(idx).fillna(0).values
-        R[m] = (rf.reindex(idx.union(rf.index)).ffill().reindex(idx).fillna(0).values
-                if isinstance(rf, pd.Series) else np.full(len(idx), rf))
-
-    gaps = np.r_[1, np.diff(idx.values).astype('timedelta64[D]').astype(int)]
-    month_end = np.r_[idx[1:].month != idx[:-1].month, True]
-    semi = np.r_[False, (idx[1:].month != idx[:-1].month) & np.isin(idx[1:].month, [1, 7])]
-
-    cap = {m: init * weights[m] for m in names}
-    L = {m: 0.0 for m in names}
-    last_t = {m: None for m in names}
-    trim_pending = {m: False for m in names}
-
-    pv = np.zeros(len(idx))
-    flows = np.zeros(len(idx))
-    levs = np.zeros(len(idx))
-    trades = 0
-    turnover = 0.0
-
-    for i in range(len(idx)):
-        # Step 1: 每日損益結算與自然漂移
-        for m in names:
-            sp = markets[m][3]
-            rf_d = R[m][i] * gaps[i] / 365.0
-            sp_d = sp * gaps[i] / 365.0
-            r = P[m][i]
-
-            rf_earn = (0.60 * rf_d) if (cash_drag_us and 'US' in m) else rf_d
-
-            net = rf_earn + L[m] * (r - rf_d - sp_d)
-            cap[m] *= (1.0 + net)
-            L[m] = L[m] * (1.0 + r) / (1.0 + net) if (1.0 + net) > 0 else 0.0
-
-        # ★ 關鍵：在任何本金移轉 (半年再平衡) 與新資金注入 (DCA) 之前，先鎖定各市場當日收盤的「真實舊名目部位」
-        old_notional = {m: cap[m] * L[m] for m in names}
-        total = sum(cap.values())
-
-        # Step 2: 半年再平衡 (1月/7月初) — 僅調整本金與計算對應之預備槓桿 L[m]，交易成本留待 Step 4 由 old_notional 統一結算！
-        if len(names) == 2 and semi[i]:
-            w_us = cap['US'] / total if total > 0 else 0.6
-            if semi_mode in ('adjust_notional', 'cash_only'):
-                if w_us < 0.55 or w_us > 0.65:
-                    for m, tw in [('US', 0.6), ('TW', 0.4)]:
-                        new_c = total * tw
-                        if semi_mode == 'cash_only':
-                            L[m] = old_notional[m] / new_c if new_c > 0 else 0.0
-                        cap[m] = new_c
-            elif semi_mode in ('manual_sop', 'band_50_70'):
-                # 手冊SOP/寬帶：僅在極端偏離 (<50% 或 >70%) 時才電匯硬再平衡拉回 60/40
-                if w_us < 0.50 or w_us > 0.70:
-                    for m, tw in [('US', 0.6), ('TW', 0.4)]:
-                        cap[m] = total * tw
-        elif len(names) == 3 and semi[i]:
-            w_us1 = cap['US1'] / total if total > 0 else 0.3
-            w_us2 = cap['US2'] / total if total > 0 else 0.3
-            w_us = w_us1 + w_us2
-            if semi_mode == 'pure_drift':
-                if w_us < 0.55 or w_us > 0.65:
-                    ratio = (total * 0.6) / (cap['US1'] + cap['US2']) if (cap['US1'] + cap['US2']) > 0 else 0.0
-                    cap['US1'] *= ratio
-                    cap['US2'] *= ratio
-                    cap['TW'] = total * 0.4
-            elif semi_mode in ('adjust_notional', 'semi_sub_reb'):
-                if w_us < 0.55 or w_us > 0.65 or abs(w_us1 - w_us2) > 0.05:
-                    cap['US1'] = total * 0.3
-                    cap['US2'] = total * 0.3
-                    cap['TW'] = total * 0.4
-
-        # Step 3: 月底新資金流分配 (DCA 只增加現金本金，並將舊名目除以新本金得出未加買前之稀釋後槓桿)
-        recv = None
-        if month_end[i] and cash > 0:
-            total = sum(cap.values())
-            if len(names) == 2:
-                recv = 'US' if (cap['US'] / total < weights['US']) else 'TW'
-            else:
-                ratios = {m: cap[m] / (total * weights[m]) for m in names}
-                recv = min(ratios, key=ratios.get)
-            cap[recv] += cash
-            L[recv] = old_notional[recv] / cap[recv] if cap[recv] > 0 else 0.0
-            flows[i] = cash
-
-        # Step 4: 換檔判定、DCA 計畫部位預算出、修剪封頂與統一費用結算
-        total_before_fee = sum(cap.values())
-        new_notional = {}
-        for m in names:
-            t = T[m][i]
-            if rule in ('legacy', 'daily', 'payday_full', 'symmetric'):
-                sig_reb = (last_t[m] is None) or (t != last_t[m])
-                if rule == 'daily':
-                    sig_reb = True
-                elif rule == 'payday_full' and month_end[i]:
-                    sig_reb = True
-                elif rule == 'symmetric' and (L[m] < t - band):
-                    sig_reb = True
-            elif rule in ('current', 'no_buy_down'):
-                sig_reb = (last_t[m] is None) or (t > last_t[m]) or (t < last_t[m] and L[m] > t)
-            else:
-                raise ValueError(f"Unsupported rule: {rule}")
-
-            # 先計算若不觸發修剪時的「初步計畫名目部位 planned_N」與「計畫槓桿 planned_L」
-            if sig_reb:
-                planned_N = cap[m] * t
-                trim_pending[m] = False
-            elif m == recv and cash > 0:
-                # 發薪日無換檔：初步計畫為「舊部位 + 新資金按目標 t 建倉」
-                planned_N = old_notional[m] + cash * t
-            else:
-                planned_N = cap[m] * L[m]
-
-            planned_L = planned_N / cap[m] if cap[m] > 0 else 0.0
-
-            # 接著對 planned_L 進行超標修剪判定 (徹底防止入金稀釋後又加買導致突破 t + trim！)
-            if not sig_reb:
-                if trim_lag == 0:
-                    if planned_L > t + trim:
-                        planned_N = cap[m] * t
-                else:  # trim_lag == 1 (隔日修剪 B3)
-                    if trim_pending[m]:
-                        if planned_L > t:
-                            planned_N = cap[m] * t
-                        trim_pending[m] = False
-                        planned_L = planned_N / cap[m] if cap[m] > 0 else 0.0
-                    if planned_L > t + trim:
-                        trim_pending[m] = True
-
-            new_notional[m] = planned_N
-            last_t[m] = t
-
-        # 統一結算各市場 (或 Ensemble 淨額後) 之名目交易量、交易次數與手續費
-        if len(names) == 3 and 'US1' in names and 'US2' in names:
-            # Ensemble 模式：US1 與 US2 為同一 MNQ/NQ 合約，先淨額化再計費
-            delta_us = abs((new_notional['US1'] + new_notional['US2']) - (old_notional['US1'] + old_notional['US2']))
-            if total_before_fee > 0 and (delta_us / total_before_fee) > 0.005:
-                trades += 1
-            turnover += delta_us / total_before_fee if total_before_fee > 0 else 0.0
-            fee_us = delta_us * cost
-            cap_us_tot = cap['US1'] + cap['US2']
-            for um in ('US1', 'US2'):
-                w_sub = cap[um] / cap_us_tot if cap_us_tot > 0 else 0.5
-                cap[um] -= fee_us * w_sub
-                L[um] = new_notional[um] / cap[um] if cap[um] > 0 else 0.0
-
-            delta_tw = abs(new_notional['TW'] - old_notional['TW'])
-            if total_before_fee > 0 and (delta_tw / total_before_fee) > 0.005:
-                trades += 1
-            turnover += delta_tw / total_before_fee if total_before_fee > 0 else 0.0
-            cap['TW'] -= delta_tw * cost
-            L['TW'] = new_notional['TW'] / cap['TW'] if cap['TW'] > 0 else 0.0
-        else:
-            for m in names:
-                delta_n = abs(new_notional[m] - old_notional[m])
-                if total_before_fee > 0 and (delta_n / total_before_fee) > 0.005:
-                    trades += 1
-                turnover += delta_n / total_before_fee if total_before_fee > 0 else 0.0
-                cap[m] -= delta_n * cost
-                L[m] = new_notional[m] / cap[m] if cap[m] > 0 else 0.0
-
-        total = sum(cap.values())
-        pv[i] = total
-        levs[i] = sum(cap[m] * L[m] for m in names) / total if total > 0 else 0.0
-
-    pv = pd.Series(pv, index=idx)
-    dr = (pv - flows) / pv.shift(1) - 1
-    dr.iloc[0] = 0
-    twr = (1 + dr).cumprod()
-    return dict(pv=pv, twr=twr, lev=pd.Series(levs, index=idx), trades=trades, turnover=turnover)
+def run_sim(*args, **kwargs):
+    """直接共用 engine.run() 單一內核，達成 100% 邏輯與帳務一致性"""
+    return engine_run(*args, **kwargs)
 
 
 def calc_metrics(twr, rf_series, total_trades=0):
@@ -292,14 +83,20 @@ def slice_metrics_bundle(twr, rf_series, total_trades_20y):
 # ==============================================================================
 
 def run_synthetic_dca_trim_test():
-    # 合成測試：本金 100、目標 3.0x、跌 10% 使本金變 70 / 名目變 270、入金 20
-    cap_before, old_N, t, trim, cash = 70.0, 270.0, 3.0, 0.15, 20.0
-    cap_after = cap_before + cash  # 90.0
-    planned_N = old_N + cash * t   # 270 + 60 = 330.0 (未修剪前槓桿 3.667x > 3.15x)
-    planned_L = planned_N / cap_after
-    final_N = (cap_after * t) if planned_L > t + trim else planned_N  # 觸發修剪鎖定 270.0
-    final_L = final_N / cap_after  # 3.000x <= 3.15x
-    print(f"[合成單元測試] DCA 發薪日修剪封頂驗證: 入金前 L={old_N/cap_before:.3f}x, 計畫 L={planned_L:.3f}x, 最終 L={final_L:.3f}x (修剪封頂 <= {t+trim:.2f}x: {final_L <= t + trim})")
+    """
+    真實呼叫 engine.run() 驗證 DCA 發薪日修剪封頂邏輯：
+    構造 2 天合成價格（2025-01-30 收盤 100.0，2025-01-31 月底收盤 90.0 即下跌 -10%），
+    目標槓桿恆為 3.0x，入金 20.0，驗證引擎真實輸出最終槓桿嚴格鎖定於 3.000x (<= 3.15x)。
+    """
+    dates = pd.to_datetime(['2025-01-30', '2025-01-31'])
+    df_syn = pd.DataFrame({'Close': [100.0, 90.0]}, index=dates)
+    tl_syn = pd.Series([3.0, 3.0], index=dates)
+
+    res = engine_run({'US': (df_syn, tl_syn, 0.0, 0.0)}, start='2025-01-30', init=100.0, cash=20.0, cost=0.0, weights={'US': 1.0})
+    final_L = res['lev'].iloc[-1]
+    final_pv = res['pv'].iloc[-1]
+    assert abs(final_L - 3.0) < 1e-6, f"DCA 修剪封頂斷言失敗: 預期 3.0x, 實際 {final_L:.6f}x"
+    print(f"[真實引擎驗證] DCA 發薪日修剪封頂通過: 最終 L={final_L:.3f}x, 淨值={final_pv:.1f} (封頂 <= 3.15x: True)")
 
 
 def execute_round_0():
@@ -895,7 +692,7 @@ def execute_round_3():
         if r['name'] == '(1,1,1,1,1)': tag = "⭐ 現行 Scheme C 封版點"
         elif r['name'] == '(0,0,0,0,0)': tag = "原始 v0 基準點"
         elif r['name'] == '(1,1,0,1,1)': tag = "Scheme C 拔除 E1c (MDD最小)"
-        elif r['name'] == '(1,0,1,1,1)': tag = "拔除 D1-US (最高 CAGR 32.69%)"
+        elif r['name'] == '(1,0,1,1,1)': tag = f"拔除 D1-US (最高 CAGR {r['y20_cagr']*100:.2f}%)"
         elif r['name'] == '(1,0,0,1,1)': tag = "拔除 D1-US 與 E1c"
         elif r['name'] == '(1,0,1,0,1)': tag = "拔除 D1-US 與 E3b"
         elif r['name'] == '(1,1,0,0,1)': tag = "拔除 E1c 與 E3b"
