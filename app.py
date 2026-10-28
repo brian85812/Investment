@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta, date, timezone
+from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 import logging
@@ -231,7 +232,7 @@ def fetch_robust_market_data(ticker):
     # 針對平日盤後（例如 13:45 首波更新）若 Yahoo 與 TWSE 皆尚未及時產出今日 bar，以 fast_info 立即補齊
     now = datetime.now(TZ_TAIPEI)
     today_ts = pd.Timestamp(now.strftime('%Y-%m-%d'))
-    if ticker.endswith('.TW') and today_ts not in df.index and now.weekday() < 5 and (now.hour > 13 or (now.hour == 13 and now.minute >= 30)):
+    if ticker.endswith('.TW') and today_ts not in df.index and now.weekday() < 5 and (now.hour > 13 or (now.hour == 13 and now.minute >= 35)):
         try:
             fi = yf.Ticker(ticker).fast_info
             if fi.last_price is not None and not pd.isna(fi.last_price):
@@ -258,6 +259,32 @@ def fetch_robust_market_data(ticker):
                     df.iloc[-1, df.columns.get_loc(col)] = last_price
         except Exception:
             pass
+
+    # === 防呆 1: 過濾尚未收盤的盤中即時 K 棒（嚴守 EOD 收盤鐵律）===
+    if len(df) > 0:
+        now_utc = datetime.now(timezone.utc)
+        last_date_str = df.index[-1].strftime('%Y-%m-%d')
+        if ticker.endswith('.TW'):
+            now_tw = now_utc.astimezone(TZ_TAIPEI)
+            tw_today_str = now_tw.strftime('%Y-%m-%d')
+            # 台股在台北時間 09:00 ~ 13:35 之間市場尚未收盤確認
+            is_tw_intraday = (now_tw.weekday() < 5) and ((9, 0) <= (now_tw.hour, now_tw.minute) < (13, 35))
+            if last_date_str == tw_today_str and is_tw_intraday:
+                print(f"⏳ [EOD 防呆] 偵測到 {ticker} 處於盤中交易時段 ({now_tw.strftime('%H:%M:%S')} < 13:35)，剔除未收盤 K 棒: {last_date_str}")
+                df = df.iloc[:-1]
+        else:
+            now_et = now_utc.astimezone(ZoneInfo('America/New_York'))
+            us_today_str = now_et.strftime('%Y-%m-%d')
+            # 美股在美東時間 09:30 ~ 16:05 之間市場尚未收盤確認
+            is_us_intraday = (now_et.weekday() < 5) and ((9, 30) <= (now_et.hour, now_et.minute) < (16, 5))
+            if last_date_str == us_today_str and is_us_intraday:
+                print(f"⏳ [EOD 防呆] 偵測到 {ticker} 處於美股盤中交易時段 ({now_et.strftime('%H:%M:%S')} ET < 16:05)，剔除未收盤 K 棒: {last_date_str}")
+                df = df.iloc[:-1]
+
+    # === 防呆 2: 統一將價格序列四捨五入至小數點後 2 位（消除 float32 vs float64 精度毛刺）===
+    for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']:
+        if col in df.columns:
+            df[col] = df[col].round(2)
 
     return df
 
@@ -353,7 +380,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 pre_bull_on = False
             elif pre_bull_boost is not None and not pd.isna(sma_bear):
                 if current_close >= sma_bear and sma_fast >= sma_bear:
-                    if current_close > high_bw:
+                    if current_close > high_bw + 1e-5:
                         pre_bull_on = True
                 else:
                     pre_bull_on = False
@@ -371,11 +398,11 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
             req_bear = add_above_bear or (deep_bear_guard and deep_bear_guard.get('add_above_bear', False))
             if in_trend and (i - last_action_idx >= cooldown):
-                if current_close > high_bw:
+                if current_close > high_bw + 1e-5:
                     if step_idx < max_idx and (not req_bear or pd.isna(sma_bear) or sma_fast >= sma_bear):
                         step_idx += 1
                         last_action_idx = i
-                elif current_close < low_bw:
+                elif current_close < low_bw - 1e-5:
                     if step_idx > 0:
                         step_idx -= 1
                         last_action_idx = i
