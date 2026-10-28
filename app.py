@@ -260,28 +260,23 @@ def fetch_robust_market_data(ticker):
         except Exception:
             pass
 
-    # === 防呆 1: 過濾尚未收盤的盤中即時 K 棒（嚴守 EOD 收盤鐵律）===
+    # 1. 根據各市場當地時區，剔除「今日尚未收盤」的盤中即時 K 棒（嚴守 EOD 日線收盤鐵律）
+    from zoneinfo import ZoneInfo
     if len(df) > 0:
-        now_utc = datetime.now(timezone.utc)
-        last_date_str = df.index[-1].strftime('%Y-%m-%d')
         if ticker.endswith('.TW'):
-            now_tw = now_utc.astimezone(TZ_TAIPEI)
-            tw_today_str = now_tw.strftime('%Y-%m-%d')
-            # 台股在台北時間 09:00 ~ 13:35 之間市場尚未收盤確認
-            is_tw_intraday = (now_tw.weekday() < 5) and ((9, 0) <= (now_tw.hour, now_tw.minute) < (13, 35))
-            if last_date_str == tw_today_str and is_tw_intraday:
-                print(f"⏳ [EOD 防呆] 偵測到 {ticker} 處於盤中交易時段 ({now_tw.strftime('%H:%M:%S')} < 13:35)，剔除未收盤 K 棒: {last_date_str}")
+            now_local = datetime.now(ZoneInfo('Asia/Taipei'))
+            # 台股 09:00 開盤 ~ 13:35 收盤結算前，若最後一根 K 棒日期為今日，代表是盤中未收盤 K 棒，予以剔除
+            if df.index[-1].date() == now_local.date() and now_local.strftime('%H:%M') < '13:35':
+                print(f"⏳ [EOD 防呆] 偵測到 {ticker} 尚未收盤 ({now_local.strftime('%H:%M')} < 13:35)，剔除盤中即時 K 棒: {df.index[-1].date()}")
                 df = df.iloc[:-1]
         else:
-            now_et = now_utc.astimezone(ZoneInfo('America/New_York'))
-            us_today_str = now_et.strftime('%Y-%m-%d')
-            # 美股在美東時間 09:30 ~ 16:05 之間市場尚未收盤確認
-            is_us_intraday = (now_et.weekday() < 5) and ((9, 30) <= (now_et.hour, now_et.minute) < (16, 5))
-            if last_date_str == us_today_str and is_us_intraday:
-                print(f"⏳ [EOD 防呆] 偵測到 {ticker} 處於美股盤中交易時段 ({now_et.strftime('%H:%M:%S')} ET < 16:05)，剔除未收盤 K 棒: {last_date_str}")
+            now_ny = datetime.now(ZoneInfo('America/New_York'))
+            # 美股 09:30 開盤 ~ 16:05 ET 收盤結算前，若最後一根 K 棒日期為美東今日，代表是盤中未收盤 K 棒，予以剔除
+            if df.index[-1].date() == now_ny.date() and now_ny.strftime('%H:%M') < '16:05':
+                print(f"⏳ [EOD 防呆] 偵測到 {ticker} 尚未收盤 ({now_ny.strftime('%H:%M')} ET < 16:05)，剔除盤中即時 K 棒: {df.index[-1].date()}")
                 df = df.iloc[:-1]
 
-    # === 防呆 2: 統一將價格序列四捨五入至小數點後 2 位（消除 float32 vs float64 精度毛刺）===
+    # 2. 統一將 OHLC 價格四捨五入至小數點後 2 位，消除 float32 vs float64 浮點數精度毛刺
     for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']:
         if col in df.columns:
             df[col] = df[col].round(2)
