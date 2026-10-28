@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 import logging
@@ -10,6 +10,9 @@ import threading
 import urllib.request
 import json
 import ssl
+
+# 台北時區 (UTC+8)，防範 GitHub Actions (UTC) 時區偏差
+TZ_TAIPEI = timezone(timedelta(hours=8))
 
 # 關閉不必要的 Flask 輸出
 log = logging.getLogger('werkzeug')
@@ -36,10 +39,12 @@ CACHE_TTL_MINUTES = 30
 KNOWN_DATA_PATCHES = {
     '006208.TW': {
         '2026-08-13': {'Open': 242.5, 'High': 246.0, 'Low': 242.0, 'Close': 245.5, 'Volume': 5000000.0},
-        '2026-09-01': {'Open': 244.85, 'High': 248.85, 'Low': 244.85, 'Close': 248.35, 'Volume': 3065991.0}
+        '2026-09-01': {'Open': 244.85, 'High': 248.85, 'Low': 244.85, 'Close': 248.35, 'Volume': 3065991.0},
+        '2026-10-27': {'Open': 247.75, 'High': 247.75, 'Low': 242.95, 'Close': 244.60, 'Volume': 6234509.0}
     },
     '0050.TW': {
-        '2026-08-13': {'Open': 105.5, 'High': 107.0, 'Low': 105.2, 'Close': 106.8, 'Volume': 70000000.0}
+        '2026-08-13': {'Open': 105.5, 'High': 107.0, 'Low': 105.2, 'Close': 106.8, 'Volume': 70000000.0},
+        '2026-10-27': {'Open': 107.10, 'High': 107.55, 'Low': 105.80, 'Close': 106.60, 'Volume': 153499719.0}
     }
 }
 
@@ -97,19 +102,24 @@ def fetch_yahoo_direct(ticker):
     return None
 
 def auto_patch_twse(ticker, df):
-    """第 3 層防禦（台股專屬）：向台灣證券交易所 (TWSE) 官方即時比對本月與上月 K 棒，自動縫合缺漏日"""
+    """第 3 層防禦（台股專屬）：向台灣證券交易所 (TWSE) 官方即時比對本月與上月 K 棒，自動縫合缺漏日並清理無效假 K 棒"""
     if not ticker.endswith('.TW') or df is None or df.empty:
         return df
         
     symbol = ticker.replace('.TW', '')
-    now = datetime.now()
+    now = datetime.now(TZ_TAIPEI)
     dates_to_check = [now.strftime('%Y%m01')]
     first_day = now.replace(day=1)
     prev_month = (first_day - timedelta(days=1)).strftime('%Y%m01')
     dates_to_check.append(prev_month)
     
     patched_count = 0
-    df_dates = set(df.index.strftime('%Y-%m-%d'))
+    updated_today = False
+    today_str = now.strftime('%Y-%m-%d')
+    cutoff_date = (now - timedelta(days=45)).strftime('%Y-%m-%d')
+    
+    twse_valid_dates = set()
+    rows_to_add = []
     
     for d_str in dates_to_check:
         try:
@@ -119,40 +129,68 @@ def auto_patch_twse(ticker, df):
             data = json.loads(resp.read().decode('utf-8'))
             if 'data' not in data:
                 continue
-            max_date_str = df.index.max().strftime('%Y-%m-%d') if len(df) > 0 else ''
             for row in data['data']:
                 parts = row[0].split('/')
                 ad_year = int(parts[0]) + 1911
                 iso_date = f'{ad_year}-{parts[1]}-{parts[2]}'
+                twse_valid_dates.add(iso_date)
                 
-                # 若 Yahoo 漏掉此交易日，且大於目前最新收盤日，自動以證交所官方收盤價補齊（防範歷史舊價除權息偏差）
-                if iso_date not in df_dates and (not max_date_str or iso_date > max_date_str):
-                    try:
-                        o = float(row[3].replace(',', ''))
-                        h = float(row[4].replace(',', ''))
-                        l = float(row[5].replace(',', ''))
-                        c = float(row[6].replace(',', ''))
-                        vol = float(row[1].replace(',', ''))
-                        ts = pd.Timestamp(iso_date) if df.index.tz is None else pd.Timestamp(iso_date, tz=df.index.tz)
-                        bar_data = {'Open': o, 'High': h, 'Low': l, 'Close': c, 'Volume': vol}
-                        if 'Adj Close' in df.columns:
-                            bar_data['Adj Close'] = c
-                        bar = pd.DataFrame([bar_data], index=[ts])
-                        df = pd.concat([df, bar])
-                        df_dates.add(iso_date)
-                        patched_count += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                try:
+                    o = float(row[3].replace(',', ''))
+                    h = float(row[4].replace(',', ''))
+                    l = float(row[5].replace(',', ''))
+                    c = float(row[6].replace(',', ''))
+                    vol = float(row[1].replace(',', ''))
+                except Exception:
+                    continue
+
+                ts = pd.Timestamp(iso_date)
+                
+                # 1. 若 Yahoo 漏掉此歷史交易日（近 45 天內），自動以證交所官方數據補齊
+                if ts not in df.index and iso_date >= cutoff_date:
+                    bar_data = {'Open': o, 'High': h, 'Low': l, 'Close': c, 'Volume': vol}
+                    if 'Adj Close' in df.columns:
+                        bar_data['Adj Close'] = c
+                    rows_to_add.append(pd.DataFrame([bar_data], index=[ts]))
+                    patched_count += 1
+                
+                # 2. 若今日證交所官方收盤資料已出爐，且 df 已有盤中 bar，以官方 EOD 正式收盤價更新覆寫
+                elif ts in df.index and iso_date == today_str:
+                    df.loc[ts, 'Open'] = o
+                    df.loc[ts, 'High'] = h
+                    df.loc[ts, 'Low'] = l
+                    df.loc[ts, 'Close'] = c
+                    df.loc[ts, 'Volume'] = vol
+                    if 'Adj Close' in df.columns:
+                        df.loc[ts, 'Adj Close'] = c
+                    updated_today = True
+        except Exception as e:
+            print(f"⚠️ [Layer 3] TWSE API 查詢失敗 ({symbol}, {d_str}): {e}")
             
+    if rows_to_add:
+        df = pd.concat([df] + rows_to_add)
+        
+    # 3. 剔除幽靈 K 棒：過去 45 天內、非今日、Volume 為 0 且不在證交所官方交易日列表內的假資料（如休市日）
+    ghost_indices = [
+        idx for idx in df.index 
+        if idx.strftime('%Y-%m-%d') >= cutoff_date 
+        and idx.strftime('%Y-%m-%d') < today_str 
+        and idx.strftime('%Y-%m-%d') not in twse_valid_dates 
+        and df.loc[idx, 'Volume'] == 0
+    ]
+    if ghost_indices:
+        df = df.drop(index=ghost_indices)
+        print(f"🧹 [Layer 3] 已自動剔除 {symbol} 無效休市假 K 棒: {[i.strftime('%Y-%m-%d') for i in ghost_indices]}")
+
+    df = df.sort_index()
     if patched_count > 0:
-        df = df.sort_index()
         print(f"🏛️ [Layer 3] TWSE 官方 API 自動補齊 {symbol} 遺漏的 {patched_count} 天 K 棒！")
+    if updated_today:
+        print(f"🎯 [Layer 3] TWSE 官方 API 已同步更新 {symbol} 今日最新官方收盤數據！")
     return df
 
 def fetch_robust_market_data(ticker):
-    """整合 3 層防禦的資料抓取主函式"""
+    """整合多層防禦的資料抓取主函式"""
     df = None
     # 第 1 層：標準 yfinance
     for attempt in range(2):
@@ -181,7 +219,7 @@ def fetch_robust_market_data(ticker):
     df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
     df = df[~df.index.duplicated(keep='last')].sort_index()
 
-    # 第 3 層：台股向 TWSE 自動對帳補齊
+    # 第 3 層：台股向 TWSE 自動對帳補齊與去假 K
     df = auto_patch_twse(ticker, df)
 
     # 執行已知手動補齊庫（雙重保險）
@@ -189,6 +227,26 @@ def fetch_robust_market_data(ticker):
 
     df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
     df = df[~df.index.duplicated(keep='last')].sort_index()
+
+    # 針對平日盤後（例如 13:45 首波更新）若 Yahoo 與 TWSE 皆尚未及時產出今日 bar，以 fast_info 立即補齊
+    now = datetime.now(TZ_TAIPEI)
+    today_ts = pd.Timestamp(now.strftime('%Y-%m-%d'))
+    if ticker.endswith('.TW') and today_ts not in df.index and now.weekday() < 5 and (now.hour > 13 or (now.hour == 13 and now.minute >= 30)):
+        try:
+            fi = yf.Ticker(ticker).fast_info
+            if fi.last_price is not None and not pd.isna(fi.last_price):
+                c = float(fi.last_price)
+                o = float(fi.open) if fi.open is not None and not pd.isna(fi.open) else c
+                h = float(fi.day_high) if fi.day_high is not None and not pd.isna(fi.day_high) else c
+                l = float(fi.day_low) if fi.day_low is not None and not pd.isna(fi.day_low) else c
+                vol = float(fi.last_volume) if fi.last_volume is not None and not pd.isna(fi.last_volume) else 0.0
+                bar_data = {'Open': o, 'High': h, 'Low': l, 'Close': c, 'Volume': vol}
+                if 'Adj Close' in df.columns:
+                    bar_data['Adj Close'] = c
+                df = pd.concat([df, pd.DataFrame([bar_data], index=[today_ts])]).sort_index()
+                print(f"⚡ [Layer 1.5] 已由 fast_info 補上 {ticker} 今日 ({today_ts.strftime('%Y-%m-%d')}) 盤後收盤 K 棒！")
+        except Exception as e:
+            print(f"⚠️ fast_info 今日 K 棒補齊失敗 ({ticker}): {e}")
 
     # 針對最後一天即時報價 NaN 的容錯
     if len(df) > 0 and pd.isna(df['Close'].iloc[-1]):
