@@ -8,11 +8,11 @@
     <meta name="apple-mobile-web-app-title" content="動態槓桿">
     <meta name="theme-color" content="#070a12">
     <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230b1120'/><text y='70' x='50' font-size='58' text-anchor='middle'>⚡</text></svg>">
-    <title>動態槓桿 // DYNAMIC LEVERAGE v3.0</title>
+    <title>動態槓桿 // DYNAMIC LEVERAGE v3.1</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=30">
+    <link rel="stylesheet" href="/static/style.css?v=31">
 </head>
 <body>
     <div class="terminal-shell">
@@ -21,7 +21,7 @@
             <div class="brand-group">
                 <div class="brand-dot"></div>
                 <div>
-                    <div class="brand-title">動態槓桿 · DYNAMIC LEVERAGE <span class="ver-tag">v3.0</span></div>
+                    <div class="brand-title">動態槓桿 · DYNAMIC LEVERAGE <span class="ver-tag">v3.1</span></div>
                     <div class="brand-sub">US QQQ 60% · TW 006208 40% · EOD Close System</div>
                 </div>
             </div>
@@ -43,8 +43,8 @@
         <section id="rollover-radar" class="panel rollover-panel">
             <div class="panel-header">
                 <div class="panel-title-group">
-                    <h2>🎯 期貨轉倉智能雷達</h2>
-                    <span class="panel-sub">TX / NQ 結算倒數與跨期價差健檢</span>
+                    <h2>🎯 期貨轉倉日曆雷達</h2>
+                    <span class="panel-sub">TX / NQ 結算日曆倒數與手動輸入跨期價差試算（非即時報價）</span>
                 </div>
                 <span class="mono-tag">CALENDAR SPREAD</span>
             </div>
@@ -63,12 +63,14 @@
                     <div class="title-line">
                         <h2 class="market-name"></h2>
                         <span class="ticker-code font-mono"></span>
+                        <span class="card-date-badge font-mono" style="font-size:0.75rem; opacity:0.85; margin-left:6px;"></span>
                     </div>
                     <div class="sub-badges">
                         <span class="status-badge"></span>
                         <span class="ext-badge hidden"></span>
                         <span class="accel-badge hidden"></span>
                         <span class="deep-badge hidden"></span>
+                        <span class="stale-badge hidden"></span>
                     </div>
                 </div>
                 <div class="signal-delta-box">
@@ -80,7 +82,7 @@
             <!-- 核心三大指標 (價格 / 目標槓桿 / 動能階梯) -->
             <div class="hero-metrics">
                 <div class="metric-cell">
-                    <span class="metric-label">最新收盤 (EOD)</span>
+                    <span class="metric-label eod-price-label">最新收盤 (EOD)</span>
                     <div class="metric-val font-mono price"></div>
                     <div class="metric-foot font-mono ma-dist-text"></div>
                 </div>
@@ -115,11 +117,11 @@
                     <span class="tech-v font-mono bear-c1-ma"></span>
                 </div>
                 <div class="tech-item">
-                    <span class="tech-k">🕒 上次調倉異動</span>
+                    <span class="tech-k">🕒 上次調倉異動 (模擬參考)</span>
                     <span class="tech-v font-mono last-action-val">--</span>
                 </div>
                 <div class="tech-item">
-                    <span class="tech-k">✂️ 上次修剪/減碼</span>
+                    <span class="tech-k">✂️ 上次修剪/減碼 (模擬參考)</span>
                     <span class="tech-v font-mono last-trim-val">--</span>
                 </div>
             </div>
@@ -129,11 +131,11 @@
                 <p class="strategy-explanation"></p>
             </div>
 
-            <!-- 折疊式實戰部位與 DCA 試算器 (支援 localStorage 自動記憶) -->
+            <!-- 折疊式實戰部位與 DCA 試算器 (100% 對齊 engine.run Step 4 單一淨指令) -->
             <details class="calc-drawer">
                 <summary class="calc-summary-bar">
                     <div class="calc-bar-left">
-                        <span>📐 實戰部位與 DCA 試算器</span>
+                        <span>📐 實戰部位與 DCA 單一淨指令試算器</span>
                         <span class="saved-lev-pill font-mono hidden"></span>
                     </div>
                     <span class="drawer-chevron">展開試算 ▾</span>
@@ -141,18 +143,19 @@
                 <div class="calc-body">
                     <div class="calc-inputs-grid">
                         <div class="field">
-                            <label>帳戶總淨值 <span class="auto-save-tag">自動記憶</span></label>
+                            <label>本市場入金前淨值 <span class="auto-save-tag">實帳記憶</span></label>
                             <input type="number" class="equity-input font-mono" placeholder="例: 9000000" inputmode="numeric">
                         </div>
                         <div class="field">
-                            <label>目前部位曝險 <span class="auto-save-tag">自動記憶</span></label>
+                            <label>調整前總名目曝險 <span class="auto-save-tag">實帳記憶</span></label>
                             <input type="number" class="position-input font-mono" placeholder="例: 17100000" inputmode="numeric">
                         </div>
                         <div class="field">
-                            <label>本月新資金 DCA (選填)</label>
+                            <label>分配至本市場新資金 DCA (同幣別)</label>
                             <input type="number" class="dca-input font-mono" placeholder="例: 200000" inputmode="numeric">
                         </div>
                     </div>
+                    <div class="saved-meta-note font-mono" style="font-size:0.75rem; opacity:0.75; margin-top:4px;"></div>
                     <div class="action-result hidden">
                         <div class="calc-summary font-mono"></div>
                         <div class="action-instruction"></div>
@@ -162,6 +165,6 @@
         </article>
     </template>
 
-    <script src="/static/script.js?v=30"></script>
+    <script src="/static/script.js?v=31"></script>
 </body>
 </html>

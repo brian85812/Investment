@@ -80,9 +80,13 @@ def calc_xirr(cash_flows, dates):
         if abs(step) < 1e-7: break
     return r
 
-def compute_dsr(ret_series, all_trial_sharpes, n_trials=9):
-    """Bailey & López de Prado (2014) Deflated Sharpe Ratio"""
-    r = ret_series.dropna().values
+def compute_dsr(ret_series, all_trial_sharpes, n_trials=9, rf_daily=None):
+    """Bailey & López de Prado (2014) Deflated Sharpe Ratio (統一採用超額報酬 ex = dr - rf_d 與 ddof=1)"""
+    s = ret_series.dropna()
+    if rf_daily is not None:
+        rf_aligned = rf_daily.reindex(s.index.union(rf_daily.index)).ffill().reindex(s.index).fillna(0.0)
+        s = s - rf_aligned
+    r = s.values
     T = len(r)
     if T < 2: return 0.0
     mean_r = np.mean(r)
@@ -93,7 +97,7 @@ def compute_dsr(ret_series, all_trial_sharpes, n_trials=9):
     skew = np.mean(((r - mean_r) / std_r) ** 3)
     kurt = np.mean(((r - mean_r) / std_r) ** 4)
 
-    var_trials = np.var(all_trial_sharpes) if len(all_trial_sharpes) > 1 else 1.0
+    var_trials = np.var(all_trial_sharpes, ddof=1) if len(all_trial_sharpes) > 1 else 1.0
     var_d = var_trials / 252.0
     euler = 0.57721566490153286
     z1 = norm_ppf(1.0 - 1.0 / max(2, n_trials))
@@ -107,10 +111,19 @@ def compute_dsr(ret_series, all_trial_sharpes, n_trials=9):
 
 def calc_slice_metrics(twr, rf_series, trades_tot, turnover_tot, lev_tot, full_idx,
                        us_ret_arr, tw_ret_arr, lev_us_actual, lev_tw_actual,
-                       start_str='2006-01-01', end_str=None):
-    """計算特定切片期間之完整回測指標 (以實際持倉槓桿序列計算保證金代理指標)"""
+                       start_str='2006-01-01', end_str=None,
+                       trades_series=None, turnover_series=None):
+    """計算特定切片期間之完整回測指標 (以實際持倉槓桿序列計算保證金代理指標，並支援精確子期間事件計數 M07 與首日建倉成本錨點 F15)"""
     sub_twr = twr.loc[start_str:end_str] if end_str else twr.loc[start_str:]
-    sub_twr_norm = sub_twr / sub_twr.iloc[0]
+    if len(sub_twr) == 0:
+        return dict(cagr=0, mdd=0, sharpe=0, calmar=0, lev_bar=0, turnover=0, trades=0,
+                    us_min_mm=0, tw_min_risk=0)
+    if sub_twr.index[0] == twr.index[0]:
+        anchor = 1.0
+    else:
+        prior = twr.loc[twr.index < sub_twr.index[0]]
+        anchor = float(prior.iloc[-1]) if len(prior) > 0 and float(prior.iloc[-1]) > 0 else float(sub_twr.iloc[0])
+    sub_twr_norm = sub_twr / anchor
     sub_idx = sub_twr.index
     yrs = (sub_idx[-1] - sub_idx[0]).days / 365.25
     if yrs <= 0:
@@ -123,10 +136,17 @@ def calc_slice_metrics(twr, rf_series, trades_tot, turnover_tot, lev_tot, full_i
     sharpe = met['sharpe']
     calmar = met['calmar']
 
-    ratio_time = yrs / 20.8
     lev_bar = lev_tot.reindex(sub_idx).mean()
-    turnover_ann = (turnover_tot * ratio_time) / yrs
-    trades_ann = (trades_tot * ratio_time) / yrs
+    if turnover_series is not None and isinstance(turnover_series, pd.Series):
+        turnover_ann = float(turnover_series.reindex(sub_idx).fillna(0.0).sum()) / yrs
+    else:
+        ratio_time = yrs / 20.8
+        turnover_ann = (turnover_tot * ratio_time) / yrs
+    if trades_series is not None and isinstance(trades_series, pd.Series):
+        trades_ann = float(trades_series.reindex(sub_idx).fillna(0).sum()) / yrs
+    else:
+        ratio_time = yrs / 20.8
+        trades_ann = (trades_tot * ratio_time) / yrs
 
     # 以單市場實際持倉自然槓桿序列計算保證金餘裕 (2/3 期貨池，mm=8%, im=8%)
     sub_pos = [full_idx.get_loc(d) for d in sub_idx if d in full_idx]
@@ -159,16 +179,19 @@ def calc_slice_metrics(twr, rf_series, trades_tot, turnover_tot, lev_tot, full_i
     )
 
 def paired_block_bootstrap(dr_cand, dr_base, rf_daily, block_size=60, n_boot=1000, seed=42):
-    """配對區塊 Bootstrap (計算 Delta CAGR 與 Delta Sharpe 之 95% CI)"""
+    """配對區塊 Bootstrap (計算 Delta CAGR 與 Delta Sharpe 之 95% CI，統一 ddof=1 與樣本年化率 M08)"""
     np.random.seed(seed)
     common_idx = dr_cand.index.intersection(dr_base.index)
     c1 = dr_cand.loc[common_idx].values
     c0 = dr_base.loc[common_idx].values
-    rf = rf_daily.reindex(common_idx).ffill().fillna(0).values
+    rf = rf_daily.reindex(common_idx.union(rf_daily.index)).ffill().reindex(common_idx).fillna(0).values
 
     n_samples = len(common_idx)
     n_blocks = int(np.ceil(n_samples / block_size))
-    yrs = n_samples / 252.0
+    start_anchor = (common_idx[0] - pd.offsets.BDay(1)) if n_samples > 0 else common_idx[0]
+    yrs = (common_idx[-1] - start_anchor).days / 365.25 if n_samples > 0 else n_samples / 252.0
+    ppy = n_samples / yrs if yrs > 0 else 252.0
+    rf = rf * (252.0 / ppy)
 
     delta_cagrs = []
     delta_sharpes = []
@@ -187,10 +210,10 @@ def paired_block_bootstrap(dr_cand, dr_base, rf_daily, block_size=60, n_boot=100
 
         ex_1 = b_c1 - b_rf
         ex_0 = b_c0 - b_rf
-        std_1 = np.std(ex_1)
-        std_0 = np.std(ex_0)
-        sh_1 = (np.mean(ex_1) / std_1 * math.sqrt(252)) if std_1 > 0 else 0
-        sh_0 = (np.mean(ex_0) / std_0 * math.sqrt(252)) if std_0 > 0 else 0
+        std_1 = np.std(b_c1, ddof=1)
+        std_0 = np.std(b_c0, ddof=1)
+        sh_1 = (np.mean(ex_1) / std_1 * math.sqrt(ppy)) if std_1 > 0 else 0
+        sh_0 = (np.mean(ex_0) / std_0 * math.sqrt(ppy)) if std_0 > 0 else 0
         delta_sharpes.append(sh_1 - sh_0)
 
     ci_cagr = (np.percentile(delta_cagrs, 2.5), np.percentile(delta_cagrs, 97.5))
@@ -414,11 +437,14 @@ def execute_experiment_1():
                 l_t_act = res_t_single['lev'].reindex(common_idx).ffill().fillna(0).values
                 
                 m_20y = calc_slice_metrics(res['twr'], IRX, res['trades'], res['turnover'], res['lev'],
-                                           common_idx, us_ret, tw_ret, l_u_act, l_t_act, '2006-01-01', END_DATE)
+                                           common_idx, us_ret, tw_ret, l_u_act, l_t_act, '2006-01-01', END_DATE,
+                                           trades_series=res.get('trades_series'), turnover_series=res.get('turnover_series'))
                 m_h1 = calc_slice_metrics(res['twr'], IRX, res['trades'], res['turnover'], res['lev'],
-                                          common_idx, us_ret, tw_ret, l_u_act, l_t_act, '2006-01-01', '2012-12-31')
+                                          common_idx, us_ret, tw_ret, l_u_act, l_t_act, '2006-01-01', '2012-12-31',
+                                          trades_series=res.get('trades_series'), turnover_series=res.get('turnover_series'))
                 m_h2 = calc_slice_metrics(res['twr'], IRX, res['trades'], res['turnover'], res['lev'],
-                                          common_idx, us_ret, tw_ret, l_u_act, l_t_act, '2013-01-01', END_DATE)
+                                          common_idx, us_ret, tw_ret, l_u_act, l_t_act, '2013-01-01', END_DATE,
+                                          trades_series=res.get('trades_series'), turnover_series=res.get('turnover_series'))
 
                 key = (cu_us, cu_tw)
                 results[key] = {
@@ -447,13 +473,13 @@ def execute_experiment_1():
                 if (cu_us, cu_tw) == (8, 10):
                     ci_cg_str = "[+0.00%, +0.00%]"
                     ci_sh_str = "[+0.000, +0.000]"
-                    dsr_str = f"{compute_dsr(item['dr'], all_20y_sharpes, n_trials=9):.3f}"
+                    dsr_str = f"{compute_dsr(item['dr'], all_20y_sharpes, n_trials=9, rf_daily=IRX / 252.0):.3f}"
                     verdict = "BASELINE"
                 else:
                     ci_cg, ci_sh, _ = paired_block_bootstrap(item['dr'], base_dr, IRX / 252.0, block_size=60, n_boot=1000)
                     ci_cg_str = f"[{ci_cg[0]*100:+5.2f}%, {ci_cg[1]*100:+5.2f}%]"
                     ci_sh_str = f"[{ci_sh[0]:+6.3f}, {ci_sh[1]:+6.3f}]"
-                    dsr_str = f"{compute_dsr(item['dr'], all_20y_sharpes, n_trials=9):.3f}"
+                    dsr_str = f"{compute_dsr(item['dr'], all_20y_sharpes, n_trials=9, rf_daily=IRX / 252.0):.3f}"
                     
                     delta_20y_sh = y20['sharpe'] - base_res['20y']['sharpe']
                     h1_win = h1['sharpe'] > base_res['h1']['sharpe']
@@ -653,11 +679,14 @@ def execute_experiment_2():
         l_t_act = res_t_s['lev'].reindex(idx).ffill().fillna(0).values
 
         m_20y = calc_slice_metrics(res['twr'], IRX, res['trades'], res['turnover'], res['lev'],
-                                   idx, u_ret, t_ret, l_u_act, l_t_act, '2006-01-01', END_DATE)
+                                   idx, u_ret, t_ret, l_u_act, l_t_act, '2006-01-01', END_DATE,
+                                   trades_series=res['trades_series'], turnover_series=res['turnover_series'])
         m_h1 = calc_slice_metrics(res['twr'], IRX, res['trades'], res['turnover'], res['lev'],
-                                  idx, u_ret, t_ret, l_u_act, l_t_act, '2006-01-01', '2012-12-31')
+                                  idx, u_ret, t_ret, l_u_act, l_t_act, '2006-01-01', '2012-12-31',
+                                  trades_series=res['trades_series'], turnover_series=res['turnover_series'])
         m_h2 = calc_slice_metrics(res['twr'], IRX, res['trades'], res['turnover'], res['lev'],
-                                  idx, u_ret, t_ret, l_u_act, l_t_act, '2013-01-01', END_DATE)
+                                  idx, u_ret, t_ret, l_u_act, l_t_act, '2013-01-01', END_DATE,
+                                  trades_series=res['trades_series'], turnover_series=res['turnover_series'])
         ev2_results[name] = {'res': res, '20y': m_20y, 'h1': m_h1, 'h2': m_h2, 'dr': res['twr'].pct_change().dropna()}
 
     base_dr = ev2_results["現行基準 Scheme C (Baseline: False)"]['dr']
@@ -707,8 +736,8 @@ def run_cf_simulation(cf_mode, start_date='2006-01-01', init=15e6, monthly_depos
     names = ['US', 'TW']
     weights = {'US': 0.6, 'TW': 0.4}
 
-    idx = pd.DatetimeIndex(sorted(set().union(*[markets[m][0].index for m in names])))
-    idx = idx[(idx >= pd.Timestamp(start_date)) & (idx <= pd.Timestamp(END_DATE))]
+    full_idx = pd.DatetimeIndex(sorted(set().union(*[markets[m][0].index for m in names])))
+    idx = full_idx[(full_idx >= pd.Timestamp(start_date)) & (full_idx <= pd.Timestamp(END_DATE))]
 
     P, T, R = {}, {}, {}
     for m in names:
@@ -719,7 +748,7 @@ def run_cf_simulation(cf_mode, start_date='2006-01-01', init=15e6, monthly_depos
                 if isinstance(rf, pd.Series) else np.full(len(idx), rf))
 
     gaps = np.r_[1, np.diff(idx.values).astype('timedelta64[D]').astype(int)]
-    month_end = np.r_[idx[1:].month != idx[:-1].month, True]
+    month_end = engine._compute_month_end_flags(idx, full_idx, force_last_month_end=False)
     semi = np.r_[False, (idx[1:].month != idx[:-1].month) & np.isin(idx[1:].month, [1, 7])]
 
     cap = {m: init * weights[m] for m in names}
@@ -733,21 +762,38 @@ def run_cf_simulation(cf_mode, start_date='2006-01-01', init=15e6, monthly_depos
     fut_fee_total = 0.0
     trades = 0
     turnover = 0.0
+    insolvent = False
+    insolvent_date = None
+    insolvency_deficit = 0.0
+    market_insolvent = {m: False for m in names}
 
     cf_dates = [idx[0]]
     cf_amounts = [-init]
 
     for i in range(len(idx)):
-        # Step 1: 每日結算與損益自然漂移 (精確對齊 engine.run 現金拖累帳務)
+        # Step 1: 每日結算與損益自然漂移 (精確對齊 engine.run 現金拖累帳務與破產防線 M04)
         for m in names:
+            if cap[m] <= 0.0 or market_insolvent[m]:
+                cap[m] = 0.0
+                L[m] = 0.0
+                continue
             sp = markets[m][3]
             rf_d = R[m][i] * gaps[i] / 365.0
             sp_d = sp * gaps[i] / 365.0
             r = P[m][i]
             rf_earn = (0.60 * rf_d) if (cash_drag_us and 'US' in m) else rf_d
             net = rf_earn + L[m] * (r - rf_d - sp_d)
-            cap[m] *= (1.0 + net)
-            L[m] = L[m] * (1.0 + r) / (1.0 + net) if (1.0 + net) > 0 else 0.0
+            if (1.0 + net) <= 0.0:
+                insolvency_deficit += max(0.0, -cap[m] * (1.0 + net))
+                cap[m] = 0.0
+                L[m] = 0.0
+                market_insolvent[m] = True
+                insolvent = True
+                if insolvent_date is None:
+                    insolvent_date = str(idx[i].date())
+            else:
+                cap[m] *= (1.0 + net)
+                L[m] = L[m] * (1.0 + r) / (1.0 + net)
 
         old_notional = {m: cap[m] * L[m] for m in names}
         total = sum(cap.values())
@@ -814,6 +860,8 @@ def run_cf_simulation(cf_mode, start_date='2006-01-01', init=15e6, monthly_depos
             if not sig_reb and planned_L > t + 0.15:
                 planned_N = cap[m] * t
 
+            if cap[m] <= 0 or market_insolvent[m]:
+                planned_N = 0.0
             new_notional[m] = planned_N
             last_t[m] = t
 
@@ -824,14 +872,25 @@ def run_cf_simulation(cf_mode, start_date='2006-01-01', init=15e6, monthly_depos
             turnover += delta_n / total_before_fee if total_before_fee > 0 else 0.0
             fee = delta_n * fut_cost
             fut_fee_total += fee
-            cap[m] -= fee
-            L[m] = new_notional[m] / cap[m] if cap[m] > 0 else 0.0
+            after_fee = cap[m] - fee
+            if after_fee <= 0.0 and (cap[m] > 0.0 or fee > 0.0):
+                insolvency_deficit += max(0.0, -after_fee)
+                cap[m] = 0.0
+                new_notional[m] = 0.0
+                L[m] = 0.0
+                market_insolvent[m] = True
+                insolvent = True
+                if insolvent_date is None:
+                    insolvent_date = str(idx[i].date())
+            else:
+                cap[m] = max(0.0, after_fee)
+                L[m] = new_notional[m] / cap[m] if cap[m] > 0 else 0.0
 
         pv[i] = sum(cap.values())
 
     pv = pd.Series(pv, index=idx)
     dr = (pv - flows) / pv.shift(1) - 1.0
-    dr.iloc[0] = 0.0
+    dr.iloc[0] = (pv.iloc[0] - flows[0]) / init - 1.0 if init > 0 else 0.0
     twr = (1.0 + dr).cumprod()
     yrs = (idx[-1] - idx[0]).days / 365.25
     cagr = twr.iloc[-1] ** (1.0 / yrs) - 1.0
@@ -845,7 +904,10 @@ def run_cf_simulation(cf_mode, start_date='2006-01-01', init=15e6, monthly_depos
         'wire_count': wire_count, 'trades': trades,
         'wire_fee': wire_fee_total, 'fut_fee': fut_fee_total,
         'tot_friction': wire_fee_total + fut_fee_total,
-        'yrs': yrs
+        'yrs': yrs,
+        'insolvent': insolvent,
+        'insolvent_date': insolvent_date,
+        'insolvency_deficit': float(insolvency_deficit)
     }
 
 def execute_experiment_3():

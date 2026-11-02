@@ -8,23 +8,38 @@ on:
     - cron: '45 5 * * 1-5'
     # 台北時間 14:35 (台股收盤最終確認 — 確保 TWSE 官方 API 已出爐，UTC 06:35)
     - cron: '35 6 * * 1-5'
+    # 每月 1 日 00:00 UTC 自動續命排程 (防範 GitHub Actions 60 天無 commit 自動停用排程)
+    - cron: '0 0 1 * *'
   push:
     branches:
       - main
   workflow_dispatch: # 支援在 GitHub 網頁或手機 App 上手動一鍵點擊執行
 
-# 設定 GitHub Pages 部署權限
+# 設定 GitHub Pages 部署權限與 workflow 續命權限
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 
 concurrency:
   group: "pages"
   cancel-in-progress: false
 
 jobs:
+  keepalive:
+    if: github.event.schedule == '0 0 1 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 啟用並續命 GitHub Actions 排程 (防範 60 天無 commit 休眠)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow enable "Update Moat Dashboard (Daily & On-Demand)" --repo "${{ github.repository }}" || true
+          echo "Keepalive executed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
   build-and-deploy:
+    if: github.event.schedule != '0 0 1 * *'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -36,7 +51,7 @@ jobs:
       - name: 設定 Python 環境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: 'pip'
 
       - name: 安裝相依套件
@@ -44,12 +59,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 執行量化運算並產出靜態網站
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - name: 執行量化運算並產出靜態網站構件 (F03 雙市場完整性門檻 + F11 部署前不提前推播)
         run: |
-          python build_static.py
+          python build_static.py --build-only
 
       - name: 設定 GitHub Pages 構件
         uses: actions/configure-pages@v5
@@ -62,3 +74,11 @@ jobs:
       - name: 部署至 GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: 部署成功後發送 Telegram 戰情推播 (F11/F17 部署後推播 + 重試狀態檢查)
+        if: success()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          python build_static.py --notify-only
