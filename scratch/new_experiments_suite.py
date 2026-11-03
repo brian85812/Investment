@@ -178,8 +178,8 @@ def calc_slice_metrics(twr, rf_series, trades_tot, turnover_tot, lev_tot, full_i
         us_min_mm=us_min_mm, tw_min_risk=tw_min_risk, yrs=yrs, sub_twr=sub_twr
     )
 
-def paired_block_bootstrap(dr_cand, dr_base, rf_daily, block_size=60, n_boot=1000, seed=42):
-    """配對區塊 Bootstrap (計算 Delta CAGR 與 Delta Sharpe 之 95% CI，統一 ddof=1 與樣本年化率 M08)"""
+def paired_block_bootstrap(dr_cand, dr_base, rf_daily, block_size=60, n_boot=1000, seed=42, start_anchor=None):
+    """配對區塊 Bootstrap (計算 Delta CAGR 與 Delta Sharpe 之 95% CI，統一 ddof=1、真實起始錨點與樣本年化率 M08/S06)"""
     np.random.seed(seed)
     common_idx = dr_cand.index.intersection(dr_base.index)
     c1 = dr_cand.loc[common_idx].values
@@ -188,8 +188,14 @@ def paired_block_bootstrap(dr_cand, dr_base, rf_daily, block_size=60, n_boot=100
 
     n_samples = len(common_idx)
     n_blocks = int(np.ceil(n_samples / block_size))
-    start_anchor = (common_idx[0] - pd.offsets.BDay(1)) if n_samples > 0 else common_idx[0]
-    yrs = (common_idx[-1] - start_anchor).days / 365.25 if n_samples > 0 else n_samples / 252.0
+    if start_anchor is not None:
+        anchor_ts = pd.Timestamp(start_anchor)
+    elif n_samples > 0 and isinstance(rf_daily, pd.Series):
+        prior_rf_idx = rf_daily.index[rf_daily.index < common_idx[0]]
+        anchor_ts = prior_rf_idx[-1] if len(prior_rf_idx) > 0 else (common_idx[0] - pd.offsets.BDay(1))
+    else:
+        anchor_ts = (common_idx[0] - pd.offsets.BDay(1)) if n_samples > 0 else common_idx[0]
+    yrs = (common_idx[-1] - anchor_ts).days / 365.25 if n_samples > 0 else n_samples / 252.0
     ppy = n_samples / yrs if yrs > 0 else 252.0
     rf = rf * (252.0 / ppy)
 
@@ -476,7 +482,7 @@ def execute_experiment_1():
                     dsr_str = f"{compute_dsr(item['dr'], all_20y_sharpes, n_trials=9, rf_daily=IRX / 252.0):.3f}"
                     verdict = "BASELINE"
                 else:
-                    ci_cg, ci_sh, _ = paired_block_bootstrap(item['dr'], base_dr, IRX / 252.0, block_size=60, n_boot=1000)
+                    ci_cg, ci_sh, _ = paired_block_bootstrap(item['dr'], base_dr, IRX / 252.0, block_size=60, n_boot=1000, start_anchor=y20['sub_twr'].index[0])
                     ci_cg_str = f"[{ci_cg[0]*100:+5.2f}%, {ci_cg[1]*100:+5.2f}%]"
                     ci_sh_str = f"[{ci_sh[0]:+6.3f}, {ci_sh[1]:+6.3f}]"
                     dsr_str = f"{compute_dsr(item['dr'], all_20y_sharpes, n_trials=9, rf_daily=IRX / 252.0):.3f}"
@@ -706,7 +712,7 @@ def execute_experiment_2():
             ci_sh_str = "[+0.000, +0.000]"
             verdict = "BASELINE"
         else:
-            ci_cg, ci_sh, _ = paired_block_bootstrap(it['dr'], base_dr, IRX / 252.0, block_size=60, n_boot=1000)
+            ci_cg, ci_sh, _ = paired_block_bootstrap(it['dr'], base_dr, IRX / 252.0, block_size=60, n_boot=1000, start_anchor=y20['sub_twr'].index[0])
             ci_cg_str = f"[{ci_cg[0]*100:+5.2f}%, {ci_cg[1]*100:+5.2f}%]"
             ci_sh_str = f"[{ci_sh[0]:+6.3f}, {ci_sh[1]:+6.3f}]"
             d_sh = y20['sharpe'] - base_item['20y']['sharpe']
@@ -748,7 +754,7 @@ def run_cf_simulation(cf_mode, start_date='2006-01-01', init=15e6, monthly_depos
                 if isinstance(rf, pd.Series) else np.full(len(idx), rf))
 
     gaps = np.r_[1, np.diff(idx.values).astype('timedelta64[D]').astype(int)]
-    month_end = engine._compute_month_end_flags(idx, full_idx, force_last_month_end=False)
+    month_end = engine._compute_month_end_flags(idx, full_idx, force_last_month_end=False, markets=tuple(names))
     semi = np.r_[False, (idx[1:].month != idx[:-1].month) & np.isin(idx[1:].month, [1, 7])]
 
     cap = {m: init * weights[m] for m in names}

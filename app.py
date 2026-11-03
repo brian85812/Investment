@@ -67,10 +67,17 @@ def apply_data_patches(ticker, df):
                 if 'adj_factor' in bar_dict and bar_dict['adj_factor'] is not None:
                     factor = float(bar_dict['adj_factor'])
                 elif 'Raw Close' in df.columns and 'Close' in df.columns:
+                    before = df.loc[df.index < ts]
                     after = df.loc[df.index > ts]
-                    ref = after.iloc[0] if len(after) > 0 else df.iloc[-1]
-                    if pd.notna(ref.get('Raw Close')) and float(ref['Raw Close']) > 0 and pd.notna(ref.get('Close')) and float(ref['Close']) > 0:
-                        factor = float(ref['Close']) / float(ref['Raw Close'])
+                    if len(before) > 0 and len(after) > 0:
+                        ref_b = before.iloc[-1]
+                        ref_a = after.iloc[0]
+                        if (pd.notna(ref_b.get('Raw Close')) and float(ref_b['Raw Close']) > 0 and pd.notna(ref_b.get('Close')) and float(ref_b['Close']) > 0
+                                and pd.notna(ref_a.get('Raw Close')) and float(ref_a['Raw Close']) > 0 and pd.notna(ref_a.get('Close')) and float(ref_a['Close']) > 0):
+                            fb = float(ref_b['Close']) / float(ref_b['Raw Close'])
+                            fa = float(ref_a['Close']) / float(ref_a['Raw Close'])
+                            if abs(fb - fa) <= 1e-4:
+                                factor = 0.5 * (fb + fa)
                 if factor is None or factor <= 0:
                     df.attrs['unverified_patch_skipped'] = True
                     print(f"⚠️ 略過 {ticker} 手動補丁 {date_str}：缺少可驗證之還原調整因子 (adj_factor)")
@@ -204,11 +211,13 @@ def auto_patch_twse(ticker, df):
 
                 chg_val = None
                 if len(row) > 7 and isinstance(row[7], str):
-                    cleaned_chg = row[7].replace(',', '').replace('+', '').replace('X', '').strip()
-                    try:
-                        chg_val = float(cleaned_chg)
-                    except Exception:
-                        chg_val = None
+                    raw_chg_str = row[7].strip()
+                    if not any(tok in raw_chg_str.upper() for tok in ('X', '除', '無')):
+                        cleaned_chg = raw_chg_str.replace(',', '').replace('+', '').strip()
+                        try:
+                            chg_val = float(cleaned_chg)
+                        except Exception:
+                            chg_val = None
 
                 parsed_twse_rows[iso_date] = {
                     'o': o, 'h': h, 'l': l, 'c': c, 'vol': vol, 'chg': chg_val
@@ -216,7 +225,7 @@ def auto_patch_twse(ticker, df):
         except Exception as e:
             print(f"⚠️ [Layer 3] TWSE API 查詢失敗 ({symbol}, {d_str}): {e}")
 
-    # F02/R02-R04: 計算 TWSE 原始價格對 df (auto_adjust=True) 的還原調整因子
+    # F02/R02-R04/S01: 計算 TWSE 原始價格對 df (auto_adjust=True) 的還原調整因子
     overlap_factors = {}
     for iso_date, rinfo in parsed_twse_rows.items():
         ts = pd.Timestamp(iso_date)
@@ -225,15 +234,37 @@ def auto_patch_twse(ticker, df):
             if df_c > 0:
                 overlap_factors[ts] = df_c / rinfo['c']
 
+    _tw_hol_set = {
+        '2025-01-23', '2025-01-24', '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
+        '2025-04-03', '2025-05-30', '2025-09-29', '2025-10-06', '2025-10-24',
+        '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
+        '2026-02-27', '2026-04-03', '2026-04-06', '2026-06-19', '2026-09-25', '2026-09-28', '2026-10-09', '2026-10-26', '2026-12-25'
+    }
+
+    def _is_immediate_prev_tw_session(prev_d, target_d):
+        if prev_d >= target_d or (target_d - prev_d).days > 14:
+            return False
+        cur_d = target_d - timedelta(days=1)
+        while cur_d > prev_d:
+            cur_iso = cur_d.strftime('%Y-%m-%d')
+            is_non_trade = (
+                cur_d.weekday() >= 5
+                or (cur_d.month, cur_d.day) in {(1, 1), (2, 28), (4, 4), (4, 5), (5, 1), (10, 10), (12, 25)}
+                or cur_iso in _tw_hol_set
+            ) and (cur_iso not in twse_valid_dates)
+            if not is_non_trade:
+                return False
+            cur_d -= timedelta(days=1)
+        return True
+
     def _resolve_adj_factor(target_ts, rinfo):
-        # 1. 優先以當日官方漲跌價差 (c - chg = 前一交易日除權息參考價/收盤價) 對齊 df 前一交易日還原收盤價
-        #    此法在除權息當日 (R02)、除權息前缺日 (R03) 及無重疊連續缺日遞推 (R04) 皆完全精確！
+        # 1. 優先以當日官方漲跌價差 (c - chg = 前一交易日收盤價/參考價) 對齊 df 真正前一交易日還原收盤價 (S01: 嚴格驗證無中間缺日且非無比價 X)
         if rinfo.get('chg') is not None:
             implied_prev_raw = rinfo['c'] - rinfo['chg']
             prev_idx = df.index[df.index < target_ts]
             if implied_prev_raw > 0 and len(prev_idx) > 0:
                 prev_ts = prev_idx[-1]
-                if (target_ts - prev_ts).days <= 10:
+                if _is_immediate_prev_tw_session(prev_ts.date(), target_ts.date()):
                     prev_df_c = float(df.loc[prev_ts, 'Close'])
                     if prev_df_c > 0:
                         return prev_df_c / implied_prev_raw
@@ -326,7 +357,7 @@ def fetch_robust_market_data(ticker):
         known_tw_closures = {
             '2025-01-23', '2025-01-24', '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
             '2025-04-03', '2025-05-30', '2025-09-29', '2025-10-06', '2025-10-24',
-            '2026-01-02', '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
+            '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
             '2026-02-27', '2026-04-03', '2026-04-06', '2026-06-19', '2026-09-25', '2026-09-28', '2026-10-09', '2026-10-26', '2026-12-25'
         }
         return d.strftime('%Y-%m-%d') in known_tw_closures
@@ -1129,7 +1160,7 @@ def health():
         return d.strftime('%Y-%m-%d') in {
             '2025-01-23', '2025-01-24', '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
             '2025-04-03', '2025-05-30', '2025-09-29', '2025-10-06', '2025-10-24',
-            '2026-01-02', '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
+            '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
             '2026-02-27', '2026-04-03', '2026-04-06', '2026-06-19', '2026-09-25', '2026-09-28', '2026-10-09', '2026-10-26', '2026-12-25'
         }
 
@@ -1239,7 +1270,7 @@ def compute_rollover_radar():
     known_tw_closures = {
         '2025-01-23', '2025-01-24', '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
         '2025-04-03', '2025-05-30', '2025-09-29', '2025-10-06', '2025-10-24',
-        '2026-01-02', '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
+        '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
         '2026-02-27', '2026-04-03', '2026-04-06', '2026-06-19', '2026-09-25', '2026-09-28', '2026-10-09', '2026-10-26', '2026-12-25'
     }
 
@@ -1335,6 +1366,13 @@ def compute_rollover_radar():
     cur_code_str = f"NQ{q_codes[us_cur_q]}{str(us_settlement.year)[-1]}"
     next_code_str = f"NQ{q_codes[us_next_q]}{str(us_settlement.year + (1 if us_next_q==3 else 0))[-1]}"
     
+    weekday_names = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
+    settle_wd_str = weekday_names[us_settlement.weekday()]
+    prev_trade_day = us_settlement - timedelta(days=1)
+    while prev_trade_day.weekday() >= 5:
+        prev_trade_day -= timedelta(days=1)
+    prev_wd_str = weekday_names[prev_trade_day.weekday()]
+
     if today_us < watch_start:
         us_badge = "⚪ 常規持有"
         us_class = "neutral"
@@ -1348,10 +1386,10 @@ def compute_rollover_radar():
         days_to_roll = (roll_week_start - today_us).days
         us_action = f"距自訂轉倉觀察窗 (結算前 8 日曆天起) 還有 {days_to_roll} 天，可開始留意跨季價差。"
     elif us_days_left <= 1:
-        us_badge = "🚨 週五開盤結算 · 週四必轉"
+        us_badge = f"🚨 {settle_wd_str}開盤結算 · {prev_wd_str}必轉"
         us_class = "bear"
         us_phase = "deadline"
-        us_action = "⚠️ 警告：NQ/MNQ 於結算日 09:30 ET 美股開盤即停止交易結算！請務必於前一交易日收盤前完成價差單轉倉！"
+        us_action = f"⚠️ 警告：NQ/MNQ 於結算日 ({us_settlement.strftime('%Y-%m-%d')} {settle_wd_str}) 09:30 ET 美股開盤即停止交易結算！請務必於前一交易日 ({prev_wd_str}) 收盤前完成價差單轉倉！"
     else:
         us_badge = "🎯 轉倉觀察窗 (結算前8日曆天)"
         us_class = "bull"

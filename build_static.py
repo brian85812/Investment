@@ -23,13 +23,13 @@ def send_push_notification(signals, rollover):
     chat_id = os.environ.get("TG_CHAT_ID", "").strip()
     if not bot_token or not chat_id:
         print(f"ℹ️ 未偵測到完整 TG 設定 (TG_BOT_TOKEN: {'已設定' if bot_token else '未設定'}, TG_CHAT_ID: {'已設定' if chat_id else '未設定'})，略過 Telegram 推播。")
-        return {"ok": True, "skipped": True, "attempts": 0}
+        return {"ok": True, "skipped": True, "delivered": False, "status": "skipped_unconfigured", "attempts": 0}
 
     # F03/F11: 嚴格驗證雙市場完整性、日期格式與槓桿邊界，拒絕單一市場或異常訊號發送推播
     is_valid, val_errors = validate_signals_payload(signals)
     if not is_valid:
         print(f"❌ 訊號列表未通過完整性驗證 ({'; '.join(val_errors)})，拒絕發送推播！")
-        return {"ok": False, "reason": "invalid_or_incomplete_signals", "errors": val_errors, "attempts": 0}
+        return {"ok": False, "skipped": False, "delivered": False, "status": "invalid_payload", "reason": "invalid_or_incomplete_signals", "errors": val_errors, "attempts": 0}
 
     lev_changed = any(
         (s['target_today'] != s['target_yesterday']) or s.get('deep_bear_active', False)
@@ -137,9 +137,9 @@ def send_push_notification(signals, rollover):
                 if resp_json.get("ok") is not True:
                     last_error = f"Telegram API returned ok=false: {resp_data[:120]}"
                     print(f"❌ Telegram API 應用層拒絕 (第 {attempt} 次): {last_error}")
-                    return {"ok": False, "error": last_error, "attempts": attempt}
+                    return {"ok": False, "skipped": False, "delivered": False, "status": "failed", "error": last_error, "attempts": attempt}
                 print(f"✅ Telegram 戰情推播發送成功 (第 {attempt} 次嘗試)！API 回應: {resp_data[:80]}...")
-                return {"ok": True, "attempts": attempt}
+                return {"ok": True, "skipped": False, "delivered": True, "status": "delivered", "attempts": attempt}
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode('utf-8', errors='ignore')
             last_error = f"HTTP {e.code}: {err_msg}"
@@ -148,7 +148,7 @@ def send_push_notification(signals, rollover):
             last_error = str(e)
             print(f"❌ Telegram 推播發送失敗 (第 {attempt}/{max_retries} 次): {e}")
 
-    return {"ok": False, "error": last_error, "attempts": max_retries}
+    return {"ok": False, "skipped": False, "delivered": False, "status": "failed", "error": last_error, "attempts": max_retries}
 
 
 def validate_signals_payload(signals):
@@ -293,22 +293,39 @@ def build(notify=True):
         pass
     print("✅ 已建立 .nojekyll")
 
-    # 重置推播事件去重紀錄（新一次建置完成後允許首次推播，防止同一份 dist/ 重複觸發發送兩次）
+    # S03: 保留既有推播事件去重紀錄（僅在檔案尚不存在時初始化，絕不於重複建置相同事件時清空已推播狀態）
     dedup_path = os.path.join(dist_dir, ".last_notified_event.json")
-    write_json_atomic(dedup_path, {"last_event_sig": None})
+    if not os.path.exists(dedup_path):
+        write_json_atomic(dedup_path, {"last_event_sig": None})
 
     # 7. 若啟用同步推播通知 (預設在本地單獨執行時可用；CI 部署時改由部署成功後執行 --notify-only)
     if notify:
         push_res = send_push_notification(signals, rollover)
         if not push_res.get("ok", False):
             raise RuntimeError(f"Telegram push notification failed: {push_res}")
+        if push_res.get("delivered") is True and not push_res.get("skipped", False):
+            event_sig = json.dumps({
+                "signals": [
+                    {
+                        "ticker": s.get("ticker"),
+                        "date": s.get("date"),
+                        "target_today": s.get("target_today"),
+                        "target_yesterday": s.get("target_yesterday"),
+                        "is_stale": s.get("is_stale", False),
+                        "last_trim": s.get("last_trim")
+                    }
+                    for s in signals
+                ],
+                "rollover": {k: (rollover.get(k) or {}).get("days_left") for k in ("tw", "us")}
+            }, sort_keys=True)
+            write_json_atomic(dedup_path, {"last_event_sig": event_sig})
 
     print(f"\n🎉 靜態建置完成！輸出目錄: {dist_dir}")
     print(f"🕒 建置時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 def notify_from_dist():
-    """F11/F17: 從已建置並部署完成之 dist/ 讀取訊號發送 Telegram 推播，確保推播與線上畫面一致且同一事件快照不重複推播"""
+    """F11/F17/S03/S04: 從已建置並部署完成之 dist/ 讀取訊號發送 Telegram 推播，僅在確認送達 (delivered=True) 時寫入去重狀態"""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     dist_dir = os.path.join(base_dir, "dist")
     data_path = os.path.join(dist_dir, "api_data.json")
@@ -348,7 +365,7 @@ def notify_from_dist():
                 dedup_state = json.load(f)
             if isinstance(dedup_state, dict) and dedup_state.get("last_event_sig") == event_sig:
                 print("ℹ️ 相同 EOD 事件快照已完成推播，略過重複發送。")
-                return {"ok": True, "dedup_skipped": True, "attempts": 0}
+                return {"ok": True, "dedup_skipped": True, "delivered": False, "status": "dedup_skipped", "attempts": 0}
         except Exception:
             pass
 
@@ -356,7 +373,8 @@ def notify_from_dist():
     if not push_res.get("ok", False):
         raise RuntimeError(f"Telegram push failed after retries: {push_res}")
 
-    write_json_atomic(dedup_path, {"last_event_sig": event_sig})
+    if push_res.get("delivered") is True and not push_res.get("skipped", False):
+        write_json_atomic(dedup_path, {"last_event_sig": event_sig})
     return push_res
 
 

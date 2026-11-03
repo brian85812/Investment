@@ -56,7 +56,13 @@ def load_data(refresh=False, cache_path=None, expected_sha256='3ef91f0fc386b0656
             )
         return pickle.loads(raw_bytes)
 
-    out_path = cache_path or (target_path.replace('.pkl', '_refreshed.pkl') if target_path.endswith('.pkl') else target_path + '.refreshed')
+    target_str = str(target_path)
+    cache_str = str(_CACHE)
+    is_baseline_target = (target_str == cache_str) or (target_str.replace('\\', '/').split('/')[-1] == cache_str.replace('\\', '/').split('/')[-1])
+    if not cache_path or is_baseline_target:
+        out_path = target_str.replace('.pkl', '_refreshed.pkl') if target_str.endswith('.pkl') else (target_str + '.refreshed')
+    else:
+        out_path = str(cache_path)
     us = _dl('QQQ')
     tw_raw = _dl('^TWII')
     f = pd.Series((1 + 0.035) ** (1 / 252), index=tw_raw.index).cumprod()
@@ -155,19 +161,24 @@ def build_markets(us_p=None, tw_p=None):
     return {'US': (US, target_lev(US, **us_p), IRX, 0.003),
             'TW': (TW, target_lev(TW, **tw_p), 0.013, 0.005)}
 
-def _compute_month_end_flags(idx, full_idx, force_last_month_end=False):
+def _compute_month_end_flags(idx, full_idx=None, force_last_month_end=False, markets=('US',), contribution_dates=None):
     """
-    F14 修復：判別真正月底交易日（支援月底休市如耶穌受難日 2024-03-29 等交易所日曆）。
-    - 若 idx[k] 在切片內有下一交易日，且月份不同 -> True
-    - 對最後一列 idx[-1]：
-      1) 若原始未截斷 full_idx 中仍有後續交易日，檢查下一筆交易日是否跨月；
-      2) 若已無後續交易日，檢查當月剩餘日曆日是否全為週末或已知休市日（如 Good Friday、陣亡將士紀念日、春節等）；
-      3) 除非 force_last_month_end=True，否則不在任意期中截斷日強制標記為月底入金日。
+    F14/S05 修復：依明確入金排程或對應市場之交易日曆判別真正月底交易日。
+    - 若提供 contribution_dates，直接以該明確排程判定；
+    - 否則對最後一列 idx[-1]，僅當所有參與市場 (markets，預設 ('US',)) 在當月剩餘日曆日皆為週末或該市場已知休市日
+      （避免將台股春節休市誤套用至美股或美台聯集），或 full_idx 下一交易日已跨月時，才判定為月底。
     """
     if len(idx) == 0:
         return np.array([], dtype=bool)
+    if contribution_dates is not None:
+        explicit_set = set(pd.to_datetime(list(contribution_dates)).normalize())
+        return np.array([ts.normalize() in explicit_set for ts in idx], dtype=bool)
     if force_last_month_end:
         return np.r_[idx[1:].month != idx[:-1].month, True]
+
+    if full_idx is None:
+        full_idx = idx
+    active_mkts = tuple(markets) if markets else ('US',)
 
     def _good_friday_day(year):
         a = year % 19
@@ -186,21 +197,41 @@ def _compute_month_end_flags(idx, full_idx, force_last_month_end=False):
         day = ((h + l - 7 * m + 114) % 31) + 1
         return pd.Timestamp(year=year, month=month, day=day) - pd.Timedelta(days=2)
 
-    known_month_end_closures = {
-        '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
-        '2025-05-30', '2026-02-27'
+    tw_known_closures = {
+        '2025-01-23', '2025-01-24', '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
+        '2025-04-03', '2025-05-30', '2025-09-29', '2025-10-06', '2025-10-24',
+        '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
+        '2026-02-27', '2026-04-03', '2026-04-06', '2026-06-19', '2026-09-25', '2026-09-28', '2026-10-09', '2026-10-26', '2026-12-25'
     }
 
-    def _is_non_session(ts):
+    def _is_us_non_session(ts):
         if ts.weekday() >= 5:
             return True
         if ts == _good_friday_day(ts.year):
             return True
         if ts.month == 5 and ts.weekday() == 0 and ts.day >= 25:
             return True
-        if ts.strftime('%Y-%m-%d') in known_month_end_closures:
+        return False
+
+    def _is_tw_non_session(ts):
+        if ts.weekday() >= 5:
+            return True
+        if (ts.month, ts.day) in {(1, 1), (2, 28), (4, 4), (4, 5), (5, 1), (10, 10), (12, 25)}:
+            return True
+        if ts.strftime('%Y-%m-%d') in tw_known_closures:
             return True
         return False
+
+    def _is_portfolio_non_session(ts):
+        for m in active_mkts:
+            m_up = str(m).upper()
+            if 'TW' in m_up:
+                if not _is_tw_non_session(ts):
+                    return False
+            else:
+                if not _is_us_non_session(ts):
+                    return False
+        return True
 
     last_dt = idx[-1].normalize()
     after_last = full_idx[full_idx > idx[-1]]
@@ -211,7 +242,7 @@ def _compute_month_end_flags(idx, full_idx, force_last_month_end=False):
         cur_check = last_dt + pd.Timedelta(days=1)
         has_remaining_session = False
         while cur_check <= cal_me:
-            if not _is_non_session(cur_check):
+            if not _is_portfolio_non_session(cur_check):
                 has_remaining_session = True
                 break
             cur_check += pd.Timedelta(days=1)
@@ -223,7 +254,7 @@ def _compute_month_end_flags(idx, full_idx, force_last_month_end=False):
 def run(markets, start, end=None, rule='current', reb_rule=None, band=0.15, trim=0.15,
         cash_drag_us=False, init=15e6, cash=0, cost=1e-4, weights=None,
         semi_mode='adjust_notional', trim_lag=0, force_last_month_end=False,
-        include_day0_fee_in_twr=True):
+        include_day0_fee_in_twr=True, contribution_dates=None):
     if reb_rule is not None:
         rule = reb_rule
     """
@@ -255,7 +286,7 @@ def run(markets, start, end=None, rule='current', reb_rule=None, band=0.15, trim
         R[m] = (rf.reindex(idx.union(rf.index)).ffill().reindex(idx).fillna(0).values
                 if isinstance(rf, pd.Series) else np.full(len(idx), rf))
     gaps = np.r_[1, np.diff(idx.values).astype('timedelta64[D]').astype(int)]
-    month_end = _compute_month_end_flags(idx, full_idx, force_last_month_end=force_last_month_end)
+    month_end = _compute_month_end_flags(idx, full_idx, force_last_month_end=force_last_month_end, markets=tuple(names), contribution_dates=contribution_dates)
     semi = np.r_[False, (idx[1:].month != idx[:-1].month) & np.isin(idx[1:].month, [1, 7])]
 
     cap = {m: init * weights[m] for m in names}
@@ -518,6 +549,12 @@ def run(markets, start, end=None, rule='current', reb_rule=None, band=0.15, trim
     )
 
 def metrics(twr, rf=IRX):
+    """
+    F15 口徑說明：
+    - twr、cagr、mdd 以交易前初始淨值 1.0 為基準（反映 Day-0 建倉成本）；
+    - dr = twr.pct_change().dropna() 與 yearly 以首日建倉後收盤點 twr.iloc[0] 起算次日報酬觀測；
+    - 另提供 yearly_from_par 以 1.0 為首年基準。
+    """
     dr = twr.pct_change().dropna()
     yrs = (twr.index[-1] - twr.index[0]).days / 365.25
     ppy = len(dr) / yrs
@@ -533,8 +570,10 @@ def metrics(twr, rf=IRX):
     sharpe_ex_std = ex.mean() * ppy / ex_vol if ex_vol > 0 else 0
     down = ex[ex < 0].std(ddof=1) * np.sqrt(ppy)
     sortino = ex.mean() * ppy / down if down > 0 else 0
-    yr = twr.resample('YE').last()
-    yr = pd.concat([pd.Series([twr.iloc[0]], index=[twr.index[0]]), yr]).pct_change().dropna()
+    yr_end = twr.resample('YE').last()
+    yr = pd.concat([pd.Series([twr.iloc[0]], index=[twr.index[0]]), yr_end]).pct_change().dropna()
+    yr_par = pd.concat([pd.Series([1.0], index=[twr.index[0] - pd.Timedelta(days=1)]), yr_end]).pct_change().dropna()
     return dict(cagr=cagr, mdd=mdd, vol=vol, ex_vol=ex_vol, sharpe=sharpe,
                 sharpe_ex_std=sharpe_ex_std, sortino=sortino, ppy=ppy,
-                calmar=cagr / abs(mdd) if mdd else 0, worst_year=yr.min(), yrs=yrs, yearly=yr)
+                calmar=cagr / abs(mdd) if mdd else 0, worst_year=yr.min(), yrs=yrs,
+                yearly=yr, yearly_from_par=yr_par)
