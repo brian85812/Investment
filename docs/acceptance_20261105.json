@@ -1,0 +1,72 @@
+{
+  "date": "2026-11-05",
+  "source_commit_before_fix": "16c13782e83424dd8320cabd4246a4b4f44e8dcc",
+  "python_tests": 24,
+  "notification_tests": 17,
+  "signal_event_tests": 4,
+  "http_smoke_tests": 3,
+  "new_node_cases": 6,
+  "original_node_cases": 13,
+  "original_acceptance": "passed",
+  "fixture_adapters": {
+    "python": {
+      "replacements": 1,
+      "before": "jsonify=lambda x: x",
+      "after": "jsonify=_JsonResponse",
+      "assert_AST_unchanged": true
+    },
+    "node": {
+      "replacements": 1,
+      "before": "assert(r3Trim.card_field_values[0]['.delta-badge'].includes('今日模擬修剪'), 'F11 failed: card delta badge should highlight trim today');",
+      "after": "assert(r3Trim.card_field_values[0]['.delta-badge'].includes('本期模擬修剪（超標'), 'F11 failed: card delta badge should highlight simulated excess trim');",
+      "extra_warning_class_assertions": 2,
+      "original_banner_assert_preserved": true
+    },
+    "reason": "主控明確授權：Flask Response mock與今日/本期同義文案期待；原source/JSON未改、case未刪。"
+  },
+  "six_core_AST": {
+    "US_P": true,
+    "TW_P": true,
+    "target_lev": true,
+    "target_lev_exp": true,
+    "step_monthly_dca": true,
+    "predict_6m_weight": true
+  },
+  "engine_and_suite_unchanged": true,
+  "frozen_cache_sha256": "3ef91f0fc386b06561cb62d48639912dba374443e5a69d7391195b2c52fe24e3",
+  "source_sha256": {
+    "app.py": "58017c7172daa919df5874b79acd8cc8d9e0f52ffc30aef809321cea277991fc",
+    "build_static.py": "0ca65e562143bcd1588b1eab8f50139ab087c3cc5a45c9e3c83b78a4e7cc8a74",
+    "static/script.js": "fe4ec59d404602f0b4efed31a81fc2806ff51fdad2e329b37b7e41df8d8378df",
+    "templates/index.html": "5023b4bb34cbce38879e6164c9b3c7bb2094bbd4df97a9199d53c17fae3b8070",
+    ".github/workflows/update_dashboard.yml": "15aaf8eb4bb0bb9f13a44e66a78723f647b85730b3b2d211330a7894b6d5ff99",
+    "scratch/engine.py": "8a672c7ec7ad6b2d08dd0605b69620b89a8c4e14e163e8a6c03579b824f4ce5e",
+    "scratch/new_experiments_suite.py": "0ff3f6cb62843bc947d5bb4b0990009cbd3923ad506d2d01262fb06593e3e48d",
+    "requirements.txt": "b98a4858429de6442f71d5b7c77f5bf8d29542be3db30f2eb69a32490495bf1e",
+    "tests/test_notifications.py": "2c56d78c2c724f36278b72da1acec450db1ea1b8a82cc77e3b9de658ab1e27b0",
+    "tests/test_signal_events.py": "088e1c1b164284e7de560ae06328ff965b907caa6bee7c985755de85e10df8d8",
+    "tests/test_http_smoke.py": "99651cf63d2da303a8a48629b2f9e94ee1c4e1f64186f31ed81a82710e26f762",
+    "tests/test_event_ui.js": "5cd071e23b7c5bb84c358d6f855e4120a4c3381adc2c0c7bfa15011254fd2169"
+  },
+  "root_document_mirrors": {
+    "Gemini_Handoff_Master_Prompt.md": true,
+    "實戰手冊_Strategy_Rules.md": true,
+    "完整回測紀錄_Backtest_Records.md": true
+  },
+  "no_changes_during_replay": true,
+  "offline_python_network_attempts": [],
+  "offline_node_network_attempts": [],
+  "linux_cp312_dependency_dry_run": "passed",
+  "live_build_only": "passed",
+  "live_signal_dates": {
+    "QQQ": "2026-11-04",
+    "006208.TW": "2026-11-05"
+  },
+  "remote_deployment": "See GitHub Actions for this commit; not inferred from local mocks",
+  "limits": [
+    "Node VM uses a minimal DOM",
+    "gunicorn not locally executed",
+    "no local live Telegram test",
+    "HTTP 429 retry_after not implemented; lost ACK remains uncertain"
+  ]
+}

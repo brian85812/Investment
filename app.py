@@ -604,6 +604,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     sim_L = base_leverage
     last_action_event = None  # 記錄最近一次任何部位調整 (含加碼/減碼/+0.15x修剪)
     last_trim_event = None    # 專門記錄最近一次向下減碼或 +0.15x 超標修剪
+    # 舊欄位保留相容；新欄位分列策略目標與 T+0 模擬自然漂移事件，均非實帳成交。
+    last_signal_change_event = None
+    last_excess_trim_event = None
     rf_ann = 0.045 if ticker == 'QQQ' else 0.013
     sp_ann = 0.003 if ticker == 'QQQ' else 0.005
 
@@ -754,6 +757,11 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 'type': act_label
             }
             last_action_event = evt
+            last_signal_change_event = dict(
+                evt,
+                kind='signal_change',
+                event_id=f"{ticker}|signal_change|{bar_date_str}|{evt['from_lev']:.2f}|{evt['to_lev']:.2f}"
+            )
             if is_step_down:
                 last_trim_event = evt
                 if sim_L > target:
@@ -772,6 +780,11 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             }
             last_action_event = evt
             last_trim_event = evt
+            last_excess_trim_event = dict(
+                evt,
+                kind='excess_trim',
+                event_id=f"{ticker}|excess_trim|{bar_date_str}|{evt['from_lev']:.2f}|{evt['to_lev']:.2f}"
+            )
             sim_L = target
         elif i == 0:
             sim_L = target
@@ -785,6 +798,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         last_action_event['days_ago'] = (total_bars - 1) - last_action_event['idx']
     if last_trim_event:
         last_trim_event['days_ago'] = (total_bars - 1) - last_trim_event['idx']
+    for event in (last_signal_change_event, last_excess_trim_event):
+        if event is not None:
+            event['days_ago'] = (total_bars - 1) - event['idx']
 
     # === 計算前一天的目標槓桿與顯示欄位 ===
     latest = df.iloc[-1]
@@ -985,6 +1001,14 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'deep_bear_ratio': deep_bear_guard.get('ratio', 0.97) if deep_bear_guard else None,
         'last_action': last_action_event,
         'last_trim': last_trim_event,
+        'last_signal_change': last_signal_change_event,
+        'last_excess_trim': last_excess_trim_event,
+        'signal_changed_today': bool(lev_changed),
+        'excess_trim_today': bool(
+            not lev_changed and last_excess_trim_event is not None
+            and last_excess_trim_event['date'] == latest_date_str
+            and last_excess_trim_event['days_ago'] == 0
+        ),
         'sim_natural_lev': round(float(sim_L), 2),
         'sim_note': '模擬參考路徑（T+0簡化估算，非實帳）'
     }
@@ -1245,7 +1269,7 @@ def health():
     else:
         status = 'ok'
 
-    return jsonify({
+    response = jsonify({
         'status': status,
         'market_count': len(data),
         'markets_complete': has_both,
@@ -1257,6 +1281,8 @@ def health():
         'market_dates': {item.get('ticker'): item.get('date') for item in data if isinstance(item, dict)},
         'is_updating': _cache['is_updating']
     })
+    response.status_code = 200 if status == 'ok' else 503
+    return response
 
 # ========================================================
 # 🎯 期貨轉倉智能雷達 (Rollover Radar - F13/R11 時區/完整休市表/結算時刻修正)

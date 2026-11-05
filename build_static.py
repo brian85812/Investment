@@ -15,10 +15,155 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-from app import compute_signal, compute_rollover_radar
+def compute_signal(**kwargs):
+    # Notification-only runs do not need to import the market-data application.
+    from app import compute_signal as calculate
+    return calculate(**kwargs)
 
 
-def send_push_notification(signals, rollover):
+def compute_rollover_radar():
+    from app import compute_rollover_radar as calculate
+    return calculate()
+
+
+def _market_events(signal):
+    """Stable event identity uses the event's date, never snapshot age or bar index."""
+    events = {}
+    for kind, field in (('signal_change', 'last_signal_change'), ('excess_trim', 'last_excess_trim')):
+        if field in signal:
+            candidates = [signal[field]]  # Explicit null means no such event in the new API.
+        else:
+            candidates = [signal.get('last_action'), signal.get('last_trim')]
+        for event in candidates:
+            if not isinstance(event, dict):
+                continue
+            is_excess = '+0.15' in str(event.get('type', ''))
+            if is_excess != (kind == 'excess_trim'):
+                continue
+            try:
+                event_date = event['date']
+                datetime.strptime(event_date, '%Y-%m-%d')
+                before, after = round(float(event['from_lev']), 2), round(float(event['to_lev']), 2)
+                if not math.isfinite(before) or not math.isfinite(after) or before == after:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue
+            events[kind] = {
+                **event,
+                'event_id': f"{signal['ticker']}|{kind}|{event_date}|{before:.2f}|{after:.2f}",
+            }
+            break
+        if kind == 'signal_change' and field not in signal and kind not in events:
+            try:
+                before, after = (round(float(signal[key]), 2) for key in ('target_yesterday', 'target_today'))
+                if math.isfinite(before) and math.isfinite(after) and before != after:
+                    events[kind] = {
+                        'date': signal['date'], 'from_lev': before, 'to_lev': after,
+                        'type': '目標訊號變更',
+                        'event_id': f"{signal['ticker']}|{kind}|{signal['date']}|{before:.2f}|{after:.2f}",
+                    }
+            except (KeyError, TypeError, ValueError):
+                pass
+    return events
+
+
+def _snapshot_signature(signals, rollover):
+    return json.dumps({
+        'signals': [
+            {
+                'ticker': s['ticker'], 'date': s.get('date'),
+                'target_today': round(float(s['target_today']), 2),
+                'target_yesterday': round(float(s['target_yesterday']), 2),
+                'is_stale': bool(s.get('is_stale', False)),
+                'data_status': s.get('data_status') or ('stale' if s.get('is_stale') else 'ok'),
+                'current_events': sorted(e['event_id'] for e in _market_events(s).values()
+                                         if e['date'] == s.get('date')),
+            }
+            for s in sorted(signals, key=lambda item: item['ticker'])
+        ],
+        'rollover': {k: (rollover.get(k) or {}).get('days_left')
+                     if isinstance(rollover.get(k), dict) else rollover.get(k) for k in ('tw', 'us')},
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def _read_notification_state(path):
+    state = {'schema_version': 2, 'markets': {}, 'last_snapshot_sig': None, 'last_event_sig': None}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return state
+    if not isinstance(raw, dict):
+        return state
+    if raw.get('schema_version') == 2:
+        raw_markets = raw.get('markets') if isinstance(raw.get('markets'), dict) else {}
+        for ticker, kinds in raw_markets.items():
+            if isinstance(kinds, dict):
+                state['markets'][ticker] = {
+                    kind: sorted({key for key in kinds.get(kind, []) if isinstance(key, str)})
+                    for kind in ('signal_change', 'excess_trim')
+                    if isinstance(kinds.get(kind, []), list)
+                }
+        if isinstance(raw.get('last_snapshot_sig'), str):
+            state['last_snapshot_sig'] = raw['last_snapshot_sig']
+            state['last_event_sig'] = raw['last_snapshot_sig']
+        return state
+    # Legacy snapshots were written only after delivery. Preserve identifiable events,
+    # without inventing a sent event when the old state is missing or unparseable.
+    try:
+        legacy = json.loads(raw.get('last_event_sig') or 'null')
+        if not isinstance(legacy, dict) or not isinstance(legacy.get('signals'), list):
+            return state
+        for signal in legacy['signals']:
+            if not isinstance(signal, dict) or not signal.get('ticker'):
+                continue
+            kinds = state['markets'].setdefault(signal['ticker'], {})
+            for kind, event in _market_events(signal).items():
+                kinds[kind] = [event['event_id']]
+        state['last_snapshot_sig'] = _snapshot_signature(legacy['signals'], legacy.get('rollover') or {})
+    except (KeyError, TypeError, ValueError):
+        # Any successfully identified legacy events above remain useful.
+        pass
+    return state
+
+
+def _notify_snapshot(signals, rollover, state_path):
+    valid, errors = validate_signals_payload(signals)
+    if not valid:
+        raise RuntimeError(f"Invalid notification payload: {'; '.join(errors)}")
+    state = _read_notification_state(state_path)
+    pending = {}
+    for signal in signals:
+        seen = state['markets'].get(signal['ticker'], {})
+        pending[signal['ticker']] = {
+            kind: event for kind, event in _market_events(signal).items()
+            if event['date'] == signal['date'] and event['event_id'] not in seen.get(kind, [])
+        }
+    signature = _snapshot_signature(signals, rollover)
+    if state['last_snapshot_sig'] == signature and not any(pending.values()):
+        return {'ok': True, 'dedup_skipped': True, 'delivered': False,
+                'status': 'dedup_skipped', 'attempts': 0}
+    result = send_push_notification(signals, rollover, pending_events=pending)
+    if not result.get('ok', False):
+        raise RuntimeError(f"Telegram push failed: {result}")
+    if result.get('delivered') is True and not result.get('skipped', False):
+        for ticker, events in pending.items():
+            kinds = state['markets'].setdefault(ticker, {})
+            for kind, event in events.items():
+                kinds[kind] = sorted(set(kinds.get(kind, [])) | {event['event_id']})
+        state['last_snapshot_sig'] = signature
+        state['last_event_sig'] = signature  # Compatibility with existing snapshot-state readers.
+        write_json_atomic(state_path, state)
+    return result
+
+
+def send_push_notification(signals, rollover, pending_events=None):
+    """Send a report; delivered means API acknowledgement, not a read receipt.
+
+    Retries are bounded at three attempts. HTTP 429 retry_after backoff is not
+    implemented; a lost acknowledgement can cause duplicate delivery. Neither
+    this transport nor the persisted event log promises exactly-once delivery.
+    """
     bot_token = os.environ.get("TG_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TG_CHAT_ID", "").strip()
     if not bot_token or not chat_id:
@@ -31,15 +176,11 @@ def send_push_notification(signals, rollover):
         print(f"❌ 訊號列表未通過完整性驗證 ({'; '.join(val_errors)})，拒絕發送推播！")
         return {"ok": False, "skipped": False, "delivered": False, "status": "invalid_payload", "reason": "invalid_or_incomplete_signals", "errors": val_errors, "attempts": 0}
 
-    lev_changed = any(
-        (s['target_today'] != s['target_yesterday']) or s.get('deep_bear_active', False)
-        for s in signals
-    )
-    trim_today = any(
-        (s.get('last_trim') or {}).get('days_ago') == 0
-        and '+0.15x' in str((s.get('last_trim') or {}).get('type', ''))
-        for s in signals
-    )
+    if pending_events is None:
+        pending_events = {s['ticker']: {kind: event for kind, event in _market_events(s).items()
+                                      if event['date'] == s['date']} for s in signals}
+    lev_changed = any(events.get('signal_change') for events in pending_events.values())
+    trim_today = any(events.get('excess_trim') for events in pending_events.values())
     rollover_urgent = any(
         rollover.get(k, {}).get('days_left', 99) <= 2 for k in ('tw', 'us')
     )
@@ -56,18 +197,18 @@ def send_push_notification(signals, rollover):
     elif trim_today:
         header = "⚠️ <b>【動態槓桿 · 模擬超標修剪提醒（請核對實帳槓桿）】</b>"
     else:
-        header = "🟢 <b>【動態槓桿 EOD 戰情 · 今日維持】</b>"
+        header = "🟢 <b>【動態槓桿 EOD 戰情 · 本次維持，無新增調倉】</b>"
 
     lines = [header, ""]
     for s in signals:
-        lt = s.get('last_trim')
-        is_trim_today = bool(lt and lt.get('days_ago') == 0 and '+0.15x' in str(lt.get('type', '')))
-        if s['target_today'] != s['target_yesterday']:
-            chg = f"⚡ <b>{s['target_yesterday']:.2f}x ➔ {s['target_today']:.2f}x</b>"
-        elif is_trim_today:
+        events = pending_events.get(s['ticker'], {})
+        signal_event = events.get('signal_change')
+        if signal_event:
+            chg = f"⚡ <b>{signal_event['from_lev']:.2f}x ➔ {signal_event['to_lev']:.2f}x</b>（本次新訊號）"
+        elif events.get('excess_trim'):
             chg = f"⚠️ 維持 <b>{s['target_today']:.2f}x</b> (今日觸發模擬修剪提醒，實帳若 &gt;{s['trim_trigger_lev']:.2f}x 請砍回目標)"
         else:
-            chg = f"維持 <b>{s['target_today']:.2f}x</b>"
+            chg = f"維持 <b>{s['target_today']:.2f}x</b>（無新增調倉）"
 
         if not s['in_trend']:
             if s.get('pre_bull_active', False):
@@ -86,22 +227,21 @@ def send_push_notification(signals, rollover):
                 add_str = f"<code>&gt;{s['high_bw']:.2f}</code>"
             sub_str = "<code>已處底倉</code>" if s['step_idx'] == 0 else f"<code>&lt;{s['low_bw']:.2f}</code>"
 
-        la = s.get('last_action')
+        history = _market_events(s)
+        la = history.get('signal_change')
+        lt = history.get('excess_trim')
         la_str = (
-            f"{la['date']} ({'今日' if la['days_ago']==0 else str(la['days_ago'])+'日前'}) "
+            f"{la['date']} "
             f"<code>{la['from_lev']:.2f}x ➔ {la['to_lev']:.2f}x</code> [{la['type']}]"
-            if la else "無"
+            if la else ("尚無獨立紀錄" if 'last_signal_change' in s else "舊版未分列")
         )
         lt_str = (
-            f"{lt['date']} ({'今日' if lt['days_ago']==0 else str(lt['days_ago'])+'日前'}) "
+            f"{lt['date']} "
             f"<code>{lt['from_lev']:.2f}x ➔ {lt['to_lev']:.2f}x</code> [{lt['type']}]"
-            if lt else "無"
+            if lt else ("尚無獨立紀錄" if 'last_excess_trim' in s else "舊版未分列")
         )
-        hist_line = f"  🕒 上次調倉(模擬參考): {la_str}"
-        if lt and (not la or lt['date'] != la['date'] or lt['type'] != la['type']):
-            hist_line += f"\n  ✂️ 上次修剪(模擬參考): {lt_str}"
-        else:
-            hist_line = f"  ✂️ 上次調倉/修剪(模擬參考): {la_str}"
+        hist_line = (f"  🕒 上次目標變更(歷史參考): {la_str}"
+                     f"\n  ✂️ 上次超標修剪(模擬參考): {lt_str}")
 
         lines.append(
             f"• <b>{s['name']}</b> ({s['date']})｜收盤 <code>{s['close']:.2f}</code>\n"
@@ -300,25 +440,7 @@ def build(notify=True):
 
     # 7. 若啟用同步推播通知 (預設在本地單獨執行時可用；CI 部署時改由部署成功後執行 --notify-only)
     if notify:
-        push_res = send_push_notification(signals, rollover)
-        if not push_res.get("ok", False):
-            raise RuntimeError(f"Telegram push notification failed: {push_res}")
-        if push_res.get("delivered") is True and not push_res.get("skipped", False):
-            event_sig = json.dumps({
-                "signals": [
-                    {
-                        "ticker": s.get("ticker"),
-                        "date": s.get("date"),
-                        "target_today": s.get("target_today"),
-                        "target_yesterday": s.get("target_yesterday"),
-                        "is_stale": s.get("is_stale", False),
-                        "last_trim": s.get("last_trim")
-                    }
-                    for s in signals
-                ],
-                "rollover": {k: (rollover.get(k) or {}).get("days_left") for k in ("tw", "us")}
-            }, sort_keys=True)
-            write_json_atomic(dedup_path, {"last_event_sig": event_sig})
+        _notify_snapshot(signals, rollover, dedup_path)
 
     print(f"\n🎉 靜態建置完成！輸出目錄: {dist_dir}")
     print(f"🕒 建置時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -340,42 +462,7 @@ def notify_from_dist():
     with open(rollover_path, "r", encoding="utf-8") as f:
         rollover = json.load(f)
 
-    is_valid, val_errors = validate_signals_payload(signals)
-    if not is_valid:
-        raise RuntimeError(f"Invalid dist/api_data.json: {'; '.join(val_errors)}")
-
-    event_sig = json.dumps({
-        "signals": [
-            {
-                "ticker": s.get("ticker"),
-                "date": s.get("date"),
-                "target_today": s.get("target_today"),
-                "target_yesterday": s.get("target_yesterday"),
-                "is_stale": s.get("is_stale", False),
-                "last_trim": s.get("last_trim")
-            }
-            for s in signals
-        ],
-        "rollover": {k: (rollover.get(k) or {}).get("days_left") for k in ("tw", "us")}
-    }, sort_keys=True)
-
-    if os.path.exists(dedup_path):
-        try:
-            with open(dedup_path, "r", encoding="utf-8") as f:
-                dedup_state = json.load(f)
-            if isinstance(dedup_state, dict) and dedup_state.get("last_event_sig") == event_sig:
-                print("ℹ️ 相同 EOD 事件快照已完成推播，略過重複發送。")
-                return {"ok": True, "dedup_skipped": True, "delivered": False, "status": "dedup_skipped", "attempts": 0}
-        except Exception:
-            pass
-
-    push_res = send_push_notification(signals, rollover)
-    if not push_res.get("ok", False):
-        raise RuntimeError(f"Telegram push failed after retries: {push_res}")
-
-    if push_res.get("delivered") is True and not push_res.get("skipped", False):
-        write_json_atomic(dedup_path, {"last_event_sig": event_sig})
-    return push_res
+    return _notify_snapshot(signals, rollover, dedup_path)
 
 
 if __name__ == "__main__":

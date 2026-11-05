@@ -13,6 +13,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionFormState = new Map();
     const sessionRolloverInputs = {};
 
+    // 新欄位即使為 null 也有明確語義；只有舊 API 才按事件種類有限回退。
+    function getMarketEvents(market) {
+        const owns = key => Object.prototype.hasOwnProperty.call(market, key);
+        const isExcessTrim = event => Boolean(event && String(event.type || '').includes('+0.15x'));
+        const isSignalChange = event => Boolean(event && !isExcessTrim(event)
+            && Number.isFinite(Number(event.from_lev)) && Number.isFinite(Number(event.to_lev))
+            && Number(event.from_lev).toFixed(2) !== Number(event.to_lev).toFixed(2));
+        return {
+            signal: owns('last_signal_change') ? market.last_signal_change
+                : [market.last_action, market.last_trim].find(isSignalChange) || null,
+            excess: owns('last_excess_trim') ? market.last_excess_trim
+                : [market.last_trim, market.last_action].find(isExcessTrim) || null,
+            legacySignal: !owns('last_signal_change'),
+            legacyExcess: !owns('last_excess_trim')
+        };
+    }
+
     function fetchData(retryCount = 0) {
         fetch(DATA_API_URL + '?t=' + new Date().getTime())
             .then(res => {
@@ -54,12 +71,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         const shortLabel = market.ticker === 'QQQ' ? 'US' : (market.ticker === '006208.TW' ? 'TW' : market.ticker);
                         marketDates.push({ label: shortLabel, ticker: market.ticker, date: market.date });
                     }
-                    if (market.target_today !== market.target_yesterday) anyLevChanged = true;
+                    const targetChangedToday = Number(market.target_today).toFixed(2)
+                        !== Number(market.target_yesterday).toFixed(2);
+                    if (targetChangedToday) anyLevChanged = true;
+                    const events = getMarketEvents(market);
 
                     const isTrimToday = Boolean(
-                        market.last_trim &&
-                        market.last_trim.days_ago === 0 &&
-                        String(market.last_trim.type || '').includes('+0.15x')
+                        !targetChangedToday && events.excess &&
+                        events.excess.date === market.date && events.excess.days_ago === 0
                     );
                     if (isTrimToday) anyTrimToday = true;
 
@@ -127,11 +146,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     // 今日動作對比 (F11: 區分換檔、當日觸發模擬超標修剪、一般維持)
                     const deltaBadge = clone.querySelector('.delta-badge');
-                    if (market.target_today !== market.target_yesterday) {
-                        deltaBadge.textContent = `⚡ 調倉 ${market.target_yesterday.toFixed(2)}x ➔ ${market.target_today.toFixed(2)}x`;
+                    if (targetChangedToday) {
+                        deltaBadge.textContent = `⚡ 目標變更 ${market.target_yesterday.toFixed(2)}x ➔ ${market.target_today.toFixed(2)}x`;
                         deltaBadge.classList.add('change');
                     } else if (isTrimToday) {
-                        deltaBadge.textContent = `✂️ 今日模擬修剪 (${market.last_trim.from_lev.toFixed(2)}x➔${market.target_today.toFixed(2)}x)`;
+                        deltaBadge.textContent = `✂️ 本期模擬修剪（超標 ${events.excess.from_lev.toFixed(2)}x➔${market.target_today.toFixed(2)}x）`;
                         deltaBadge.classList.add('change');
                     } else {
                         deltaBadge.textContent = `維持 ${market.target_today.toFixed(2)}x`;
@@ -197,18 +216,18 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? `${market.sma_bear_val.toFixed(1)} / ${c1Thresh}`
                         : '--';
 
-                    const fmtEvent = (evt) => {
-                        if (!evt) return '無紀錄';
-                        const dTag = evt.days_ago === 0 ? '今日' : `${evt.days_ago}日前`;
+                    const fmtEvent = (evt, legacy) => {
+                        if (!evt) return legacy ? '舊版未分列；等待資料更新' : '尚無獨立紀錄';
+                        const dTag = evt.days_ago === 0 ? '本期' : `${evt.days_ago}交易日前`;
                         return `${evt.date} (${dTag}) ${evt.from_lev.toFixed(2)}x➔${evt.to_lev.toFixed(2)}x [${evt.type}]`;
                     };
                     const lastActElem = clone.querySelector('.last-action-val');
                     if (lastActElem) {
-                        lastActElem.textContent = fmtEvent(market.last_action);
+                        lastActElem.textContent = fmtEvent(events.signal, events.legacySignal);
                     }
                     const lastTrimElem = clone.querySelector('.last-trim-val');
                     if (lastTrimElem) {
-                        lastTrimElem.textContent = fmtEvent(market.last_trim);
+                        lastTrimElem.textContent = fmtEvent(events.excess, events.legacyExcess);
                     }
 
                     clone.querySelector('.strategy-explanation').textContent = market.explanation;

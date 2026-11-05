@@ -59,11 +59,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 執行離線 Python 回歸測試
+        run: python -B -m unittest discover -s tests -p "test_*.py"
+
+      - name: 設定 Node 測試環境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 執行離線前端事件測試
+        run: node tests/test_event_ui.js
+
       - name: 還原前次已送達之推播事件去重狀態 (S03 跨 Run 去重狀態持久化)
         uses: actions/cache/restore@v4
         with:
           path: dist/.last_notified_event.json
-          key: tg-notify-dedup-${{ github.run_id }}
+          key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             tg-notify-dedup-
 
@@ -96,4 +107,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: dist/.last_notified_event.json
-          key: tg-notify-dedup-${{ github.run_id }}
+          key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}
