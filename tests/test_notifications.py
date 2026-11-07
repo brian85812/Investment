@@ -241,6 +241,60 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len({keys[0].replace('${{ github.run_id }}', '200')
                               .replace('${{ github.run_attempt }}', attempt) for attempt in ('1', '2')}), 2)
 
+    def test_stale_market_has_precise_warning_without_new_adjustment_or_sent_event(self):
+        tw = self.tw_signal('2026-11-05')
+        tw.update(expected_session='2026-11-06', is_stale=True, data_status='stale')
+        tw['last_excess_trim'] = event('excess_trim', tw['date'], 3.04, 2.8)
+        self.send()
+        text = self.payloads[-1]['text']
+        self.assertIn('台股資料延遲：11/05，應11/06', text)
+        self.assertIn('歷史目標 <b>2.80x</b>（待更新，非本期調倉指示）', text)
+        self.assertNotIn('（本次新訊號）', text)
+        self.assertNotIn('今日觸發模擬修剪提醒', text)
+        self.assertIn('2026-11-05', text)  # Historical records remain readable.
+        state = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertFalse(state['markets']['006208.TW'])
+
+    def test_current_date_fallback_is_not_called_delay_or_consumed(self):
+        tw = self.tw_signal()
+        tw.update(expected_session=tw['date'], fallback_used=True, data_status='ok')
+        self.send()
+        text = self.payloads[-1]['text']
+        self.assertIn('台股來源失敗，使用備援資料', text)
+        self.assertNotIn('台股資料延遲', text)
+        self.assertNotIn('（本次新訊號）', text)
+        tw['fallback_used'] = False
+        self.send()
+        self.assertIn('（本次新訊號）', self.payloads[-1]['text'])
+
+    def test_cached_fallback_stale_without_a_known_date_gap_does_not_invent_delay(self):
+        tw = self.tw_signal()
+        tw.update(expected_session=tw['date'], data_status='fallback_stale')
+        self.send()
+        self.assertIn('來源失敗，使用備援資料', self.payloads[-1]['text'])
+        self.assertNotIn('台股資料延遲', self.payloads[-1]['text'])
+        self.assertNotIn('（本次新訊號）', self.payloads[-1]['text'])
+
+    def test_expected_date_alone_blocks_stale_direct_notification(self):
+        tw = self.tw_signal()
+        tw['expected_session'] = '2026-11-05'
+        pending = {'006208.TW': build._market_events(tw)}
+        build.send_push_notification(self.signals, self.rollover, pending_events=pending)
+        self.assertIn('台股資料延遲：11/04，應11/05', self.payloads[-1]['text'])
+        self.assertNotIn('（本次新訊號）', self.payloads[-1]['text'])
+
+    def test_structured_cooldown_and_grace_are_rendered_in_channels(self):
+        self.signals[1]['strategy_state'] = {
+            'schema_version': 1, 'label': '多頭階梯',
+            'cooldown': {'active': True, 'remaining_days': 9, 'applies_to_current_stage': True},
+            'grace': {'active': True, 'days_elapsed': 1, 'days_allowed': 1},
+            'd1': {'blocked': False}, 'blocked_actions': [],
+        }
+        self.send()
+        text = self.payloads[-1]['text']
+        self.assertGreaterEqual(text.count('冷卻中，餘 9 個市場交易日'), 3)
+        self.assertIn('年線容忍 1/1 日', text)
+
     def test_rerun_cache_keeps_new_delivery_for_the_next_run(self):
         cache = {}
         workflow = (REPO / '.github/workflows/update_dashboard.yml').read_text(encoding='utf-8')

@@ -12,7 +12,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=31">
+    <link rel="stylesheet" href="/static/style.css?v=32">
 </head>
 <body>
     <div class="terminal-shell">
@@ -67,6 +67,9 @@
                     </div>
                     <div class="sub-badges">
                         <span class="status-badge"></span>
+                        <span class="stage-badge hidden"></span>
+                        <span class="cooldown-badge hidden"></span>
+                        <span class="grace-badge hidden"></span>
                         <span class="ext-badge hidden"></span>
                         <span class="accel-badge hidden"></span>
                         <span class="deep-badge hidden"></span>
@@ -141,6 +144,7 @@
                     <span class="drawer-chevron">展開試算 ▾</span>
                 </summary>
                 <div class="calc-body">
+                    <p class="calc-freshness-note hidden"></p>
                     <div class="calc-inputs-grid">
                         <div class="field">
                             <label>本市場入金前淨值 <span class="auto-save-tag">實帳記憶</span></label>
@@ -165,6 +169,6 @@
         </article>
     </template>
 
-    <script src="/static/script.js?v=31"></script>
+    <script src="/static/script.js?v=32"></script>
 </body>
 </html>

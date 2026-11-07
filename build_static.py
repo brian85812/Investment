@@ -67,6 +67,86 @@ def _market_events(signal):
     return events
 
 
+def _freshness_issues(signal):
+    """Keep stale dates, missing markets (validator), and cached fallback distinct."""
+    label = {'QQQ': '美股', '006208.TW': '台股'}.get(signal.get('ticker'), signal.get('ticker', '市場'))
+    status = str(signal.get('data_status') or '')
+    date, expected = signal.get('date'), signal.get('expected_session')
+    dated_lag = isinstance(date, str) and isinstance(expected, str) and date < expected
+    stale = signal.get('is_stale') or status in ('stale', 'fallback_stale') or dated_lag
+    fallback = signal.get('fallback_used') or status.startswith('fallback')
+    short = lambda value: value[5:].replace('-', '/') if isinstance(value, str) and len(value) == 10 else (value or '未知')
+    issues = []
+    if dated_lag:
+        issues.append(f"{label}資料延遲：{short(date)}，應{short(expected)}")
+    elif stale and not fallback:
+        issues.append(f"{label}資料新鮮度未確認（資料{short(date)}，應有日期待核）")
+    if fallback:
+        issues.append(f"{label}來源失敗，使用備援資料（截至{short(date)}）")
+    if status not in ('', 'ok', 'stale', 'fallback', 'fallback_stale'):
+        issues.append(f"{label}資料來源狀態：{status}")
+    return issues
+
+
+def _strategy_state_text(signal):
+    state = signal.get('strategy_state')
+    if not isinstance(state, dict) or state.get('schema_version') != 1:
+        return '冷卻資訊未提供（舊版資料）'
+    parts = [state.get('label', '策略狀態')]
+    cd = state.get('cooldown') or {}
+    if cd.get('active'):
+        parts.append(f"{_cooldown_direction(cd)}，餘 {cd.get('remaining_days')} 個市場交易日")
+    elif cd.get('timer_active') and not cd.get('applies_to_current_stage'):
+        parts.append('防禦階段，階梯冷卻不適用')
+    else:
+        parts.append('階梯冷卻已結束')
+    if cd.get('step_event_on_data_bar'):
+        parts.append('資料日階梯動作已生效，新冷卻自該動作起算')
+    grace = state.get('grace') or {}
+    if grace.get('active'):
+        parts.append(f"年線容忍 {grace.get('days_elapsed')}/{grace.get('days_allowed')} 日")
+    if (state.get('d1') or {}).get('blocked'):
+        parts.append('D1 僅凍結升檔')
+    if (state.get('bull_acceleration') or {}).get('active'):
+        parts.append(f"牛初加速（含資料日餘 {(state['bull_acceleration']).get('days_including_data_bar')} 個市場交易日）")
+    if (state.get('extension') or {}).get('capping_active'):
+        parts.append(f"Extension 封頂 {state['extension'].get('cap')}x")
+    if (state.get('priority_defense') or {}).get('bypasses_step_cooldown'):
+        parts.append('年線／深熊優先防禦不受階梯冷卻限制')
+    return '；'.join(parts)
+
+
+def _cooldown_direction(cd):
+    try:
+        before, after = float(cd['last_step_from']), float(cd['last_step_to'])
+        if math.isfinite(before) and math.isfinite(after):
+            if after < before:
+                return '減碼後階梯冷卻中'
+            if after > before:
+                return '加碼後階梯冷卻中'
+    except (KeyError, TypeError, ValueError):
+        pass
+    return {'step_up': '加碼後階梯冷卻中', 'step_down': '減碼後階梯冷卻中'}.get(
+        cd.get('last_step_event_kind'), '階梯冷卻中')
+
+
+def _channel_state_text(signal, action):
+    state = signal.get('strategy_state')
+    if not isinstance(state, dict) or state.get('schema_version') != 1 or not isinstance(state.get('cooldown'), dict):
+        return '冷卻資訊未提供'
+    cd = state.get('cooldown') or {}
+    reasons = [item['label'] for item in state.get('blocked_actions', [])
+               if item.get('action') == action and item.get('label')
+               and not (cd.get('active') and item.get('reason') == 'cooldown')]
+    if cd.get('active'):
+        reasons.insert(0, f"{_cooldown_direction(cd)}，餘 {cd.get('remaining_days')} 個市場交易日")
+    else:
+        reasons.insert(0, '冷卻已結束' if cd.get('applies_to_current_stage') else '防禦轉換不受階梯冷卻限制')
+    if (state.get('triggers') or {}).get('breakout_up' if action == 'step_up' else 'breakout_down'):
+        reasons.append('資料日已突破通道' if action == 'step_up' else '資料日已跌破通道')
+    return '；'.join(dict.fromkeys(reasons))
+
+
 def _snapshot_signature(signals, rollover):
     return json.dumps({
         'signals': [
@@ -76,6 +156,8 @@ def _snapshot_signature(signals, rollover):
                 'target_yesterday': round(float(s['target_yesterday']), 2),
                 'is_stale': bool(s.get('is_stale', False)),
                 'data_status': s.get('data_status') or ('stale' if s.get('is_stale') else 'ok'),
+                'expected_session': s.get('expected_session'),
+                'fallback_used': bool(s.get('fallback_used')),
                 'current_events': sorted(e['event_id'] for e in _market_events(s).values()
                                          if e['date'] == s.get('date')),
             }
@@ -137,7 +219,8 @@ def _notify_snapshot(signals, rollover, state_path):
         seen = state['markets'].get(signal['ticker'], {})
         pending[signal['ticker']] = {
             kind: event for kind, event in _market_events(signal).items()
-            if event['date'] == signal['date'] and event['event_id'] not in seen.get(kind, [])
+            if not _freshness_issues(signal) and event['date'] == signal['date']
+            and event['event_id'] not in seen.get(kind, [])
         }
     signature = _snapshot_signature(signals, rollover)
     if state['last_snapshot_sig'] == signature and not any(pending.values()):
@@ -178,16 +261,18 @@ def send_push_notification(signals, rollover, pending_events=None):
 
     if pending_events is None:
         pending_events = {s['ticker']: {kind: event for kind, event in _market_events(s).items()
-                                      if event['date'] == s['date']} for s in signals}
+                                      if not _freshness_issues(s) and event['date'] == s['date']} for s in signals}
+    else:
+        # A direct caller cannot re-enable an old event on a degraded market card.
+        pending_events = {s['ticker']: {} if _freshness_issues(s) else pending_events.get(s['ticker'], {})
+                          for s in signals}
     lev_changed = any(events.get('signal_change') for events in pending_events.values())
     trim_today = any(events.get('excess_trim') for events in pending_events.values())
     rollover_urgent = any(
         rollover.get(k, {}).get('days_left', 99) <= 2 for k in ('tw', 'us')
     )
-    stale_warning = any(
-        s.get('is_stale', False) or s.get('data_status') in ('stale', 'fallback_stale')
-        for s in signals
-    )
+    freshness_issues = [issue for s in signals for issue in _freshness_issues(s)]
+    stale_warning = bool(freshness_issues)
     urgent = lev_changed or trim_today or rollover_urgent or stale_warning
 
     if stale_warning:
@@ -200,10 +285,14 @@ def send_push_notification(signals, rollover, pending_events=None):
         header = "🟢 <b>【動態槓桿 EOD 戰情 · 本次維持，無新增調倉】</b>"
 
     lines = [header, ""]
+    if freshness_issues:
+        lines += [f"⚠️ {' ｜ '.join(freshness_issues)}", '受影響市場僅供歷史參考，暫不提供本期調倉指示。', '']
     for s in signals:
         events = pending_events.get(s['ticker'], {})
         signal_event = events.get('signal_change')
-        if signal_event:
+        if _freshness_issues(s):
+            chg = f"截至 {s['date']} 的歷史目標 <b>{s['target_today']:.2f}x</b>（待更新，非本期調倉指示）"
+        elif signal_event:
             chg = f"⚡ <b>{signal_event['from_lev']:.2f}x ➔ {signal_event['to_lev']:.2f}x</b>（本次新訊號）"
         elif events.get('excess_trim'):
             chg = f"⚠️ 維持 <b>{s['target_today']:.2f}x</b> (今日觸發模擬修剪提醒，實帳若 &gt;{s['trim_trigger_lev']:.2f}x 請砍回目標)"
@@ -226,6 +315,8 @@ def send_push_notification(signals, rollover, pending_events=None):
             else:
                 add_str = f"<code>&gt;{s['high_bw']:.2f}</code>"
             sub_str = "<code>已處底倉</code>" if s['step_idx'] == 0 else f"<code>&lt;{s['low_bw']:.2f}</code>"
+        add_str += f"（{_channel_state_text(s, 'step_up')}）"
+        sub_str += f"（{_channel_state_text(s, 'step_down')}）"
 
         history = _market_events(s)
         la = history.get('signal_change')
@@ -247,6 +338,7 @@ def send_push_notification(signals, rollover, pending_events=None):
             f"• <b>{s['name']}</b> ({s['date']})｜收盤 <code>{s['close']:.2f}</code>\n"
             f"  目標: {chg} (階梯 {s['step_idx']}/{s['max_steps']} · 修剪線 &gt;{s['trim_trigger_lev']:.2f}x)\n"
             f"  加碼 {add_str} ｜ 減碼 {sub_str} ｜ 220MA <code>{s['sma_slow_val']:.2f}</code>\n"
+            f"  截至資料日狀態：{_strategy_state_text(s)}\n"
             f"{hist_line}"
         )
     for k in ('tw', 'us'):

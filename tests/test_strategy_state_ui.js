@@ -1,0 +1,180 @@
+// 執行真實 script.js；DOM、HTTP 與計時器皆為離線替身。
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const scriptPath = path.resolve(__dirname, '..', 'static', 'script.js');
+const source = fs.readFileSync(scriptPath, 'utf8');
+
+class Element {
+    constructor() {
+        this.parts = new Map(); this.children = []; this.listeners = {};
+        this.textContent = ''; this.innerHTML = ''; this.value = ''; this.className = ''; this.open = false;
+        const classes = new Set(['hidden']);
+        this.classList = {add: (...xs) => xs.forEach(x => classes.add(x)), remove: (...xs) => xs.forEach(x => classes.delete(x)), contains: x => classes.has(x)};
+    }
+    querySelector(selector) { if (!this.parts.has(selector)) this.parts.set(selector, new Element()); return this.parts.get(selector); }
+    appendChild(child) { this.children.push(child); }
+    addEventListener(name, callback) { this.listeners[name] = callback; }
+}
+
+function state(extra = {}) {
+    return {schema_version: 1, asof_date: '2026-11-06', stage: 'bull', label: '多頭階梯', flags: [],
+        cooldown: {active: false, timer_active: false, applies_to_current_stage: true, total_days: 10, elapsed_days: 10, remaining_days: 0},
+        grace: {active: false}, blocked_actions: [], d1: {blocked: false}, extension: {capping_active: false},
+        bull_acceleration: {active: false}, priority_defense: {active: false, bypasses_step_cooldown: true}, ...extra};
+}
+
+function market(ticker, extra = {}) {
+    return {id: ticker.replace('.', '_').toLowerCase(), name: ticker, ticker, date: '2026-11-06', expected_session: '2026-11-06',
+        is_stale: false, fallback_used: false, data_status: 'ok', close: 100, in_trend: true,
+        step_idx: 3, max_steps: 4, target_today: 2.8, target_yesterday: 2.8, trim_trigger_lev: 2.95,
+        sma_slow_val: 90, sma_fast_val: 99, sma_bear_val: 95, high_bw: 101, low_bw: 90,
+        base_leverage: 1, max_leverage: 3, explanation: '不可盲用的舊通用摘要：趨勢穩健，無操作',
+        last_signal_change: null, last_excess_trim: null, strategy_state: state(), ...extra};
+}
+
+async function render(markets) {
+    const ids = new Map(['dashboard', 'market-card-template', 'global-action-pill', 'data-date-tag', 'rollover-cards'].map(id => [id, new Element()]));
+    const cards = [];
+    ids.get('market-card-template').content = {cloneNode: () => { const card = new Element(); cards.push(card); return card; }};
+    let ready;
+    vm.runInNewContext(source, {
+        document: {getElementById: id => ids.get(id), querySelector: () => null, createElement: () => new Element(), addEventListener: (_, callback) => { ready = callback; }},
+        window: {location: {hostname: 'example.github.io', protocol: 'https:'}},
+        localStorage: {getItem: () => null, setItem: () => {}},
+        fetch: url => Promise.resolve({status: 200, json: () => Promise.resolve(url.includes('api_rollover') ? {} : markets)}),
+        setTimeout: () => {}, Date, console
+    }, {filename: scriptPath});
+    ready();
+    await new Promise(resolve => setImmediate(resolve));
+    return {cards, global: ids.get('global-action-pill'), dates: ids.get('data-date-tag')};
+}
+
+const text = (result, index, selector) => result.cards[index].querySelector(selector).textContent;
+const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, to_lev: 2.8,
+    type: kind === 'excess_trim' ? '+0.15x超標修剪' : '跌破通道減碼'});
+
+(async () => {
+    const cases = [];
+    const stale = await render([market('QQQ'), market('006208.TW', {date: '2026-11-05', is_stale: true,
+        target_yesterday: 3, last_signal_change: event('signal_change'), last_excess_trim: event('excess_trim')})]);
+    assert.match(stale.global.textContent, /台股資料延遲：11\/05，應11\/06/);
+    assert.doesNotMatch(stale.global.textContent, /資料缺失|來源失敗|🟢/);
+    assert.match(text(stale, 1, '.delta-badge'), /截至 2026-11-05.*待更新/);
+    assert.doesNotMatch(text(stale, 1, '.delta-badge'), /目標變更|本期模擬修剪/);
+    assert.match(text(stale, 1, '.last-action-val'), /2026-11-05.*跌破通道減碼/);
+    assert.match(text(stale, 1, '.last-trim-val'), /2026-11-05.*超標修剪/);
+    const card = stale.cards[1];
+    card.querySelector('.equity-input').value = '100000';
+    card.querySelector('.position-input').value = '300000';
+    card.querySelector('.position-input').listeners.input();
+    assert.match(text(stale, 1, '.action-instruction'), /暫不提供買賣指令/);
+    assert.doesNotMatch(card.querySelector('.action-instruction').innerHTML, /請淨減持|請淨加買|單一淨指令/);
+    assert.equal(card.querySelector('.equity-input').value, '100000');
+    cases.push('stale_exact_reason_suppresses_current_alert_and_definite_order_keeps_history_and_inputs');
+
+    const inferred = await render([market('QQQ'), market('006208.TW', {date: '2026-11-05'})]);
+    assert.match(inferred.global.textContent, /台股資料延遲：11\/05，應11\/06/);
+    cases.push('expected_session_date_detects_stale_even_if_flag_inconsistent');
+
+    const fallback = await render([market('QQQ'), market('006208.TW', {fallback_used: true, target_yesterday: 3})]);
+    assert.match(fallback.global.textContent, /台股來源失敗，使用備援資料/);
+    assert.doesNotMatch(fallback.global.textContent, /資料延遲|資料缺失/);
+    assert.match(text(fallback, 1, '.delta-badge'), /待更新/);
+    cases.push('same_date_fallback_is_source_failure_not_date_delay');
+
+    const cachedFallback = await render([market('QQQ'), market('006208.TW', {data_status: 'fallback_stale'})]);
+    assert.match(cachedFallback.global.textContent, /來源失敗，使用備援資料/);
+    assert.doesNotMatch(cachedFallback.global.textContent, /資料延遲/);
+    assert.match(text(cachedFallback, 1, '.delta-badge'), /待更新/);
+    const uncertainFreshness = await render([market('QQQ'), market('006208.TW', {is_stale: true})]);
+    assert.match(uncertainFreshness.global.textContent, /新鮮度未確認.*應有日期待核/);
+    assert.doesNotMatch(uncertainFreshness.global.textContent, /資料延遲：11\/06，應11\/06/);
+    cases.push('legacy_stale_flag_never_fabricates_a_date_gap');
+
+    const missing = await render([market('QQQ')]);
+    assert.match(missing.global.textContent, /台股市場資料缺失/);
+    assert.doesNotMatch(missing.global.textContent, /資料延遲/);
+    cases.push('missing_market_is_named');
+
+    const holiday = await render([market('QQQ', {date: '2026-11-05', expected_session: '2026-11-05'}), market('006208.TW')]);
+    assert.doesNotMatch(holiday.global.textContent, /資料延遲|資料缺失/);
+    assert.match(holiday.dates.textContent, /各市場交易日分列/);
+    cases.push('different_fresh_market_dates_do_not_imply_delay');
+
+    const cd = {active: true, timer_active: true, applies_to_current_stage: true, total_days: 10, elapsed_days: 1, remaining_days: 9,
+        last_step_from: 3, last_step_to: 2.8};
+    const cooling = await render([market('QQQ'), market('006208.TW', {strategy_state: state({cooldown: cd, flags: ['cooldown']})})]);
+    for (const selector of ['.cooldown-badge', '.high-bw-val', '.low-bw-val', '.strategy-explanation']) {
+        assert.match(text(cooling, 1, selector), /冷卻中.*餘 9 個市場交易日/);
+    }
+    assert.doesNotMatch(text(cooling, 1, '.strategy-explanation'), /趨勢穩健|無操作/);
+    assert.match(text(cooling, 1, '.strategy-explanation'), /實帳超過目標 \+0\.15x 仍須另核/);
+    assert.match(cooling.global.textContent, /台股減碼後階梯冷卻中.*餘 9 個市場交易日/);
+    assert.equal(cooling.global.className, 'action-pill warn');
+    cases.push('cooldown_remaining_visible_in_both_channels_and_summary');
+
+    const concurrent = await render([market('QQQ'), market('006208.TW', {
+        last_excess_trim: event('excess_trim', '2026-11-06'),
+        strategy_state: state({cooldown: {...cd, elapsed_days: 5, remaining_days: 5}, flags: ['cooldown'], triggers: {breakout_down: true}})
+    })]);
+    assert.match(concurrent.global.textContent, /模擬超標修剪.*減碼後階梯冷卻中.*餘 5 個市場交易日/);
+    assert.match(text(concurrent, 1, '.low-bw-val'), /減碼後階梯冷卻中.*資料日已跌破通道/);
+    assert.match(text(concurrent, 1, '.strategy-explanation'), /冷卻中.*模擬超標修剪/);
+    assert.doesNotMatch(concurrent.global.textContent, /🟢|資料缺失|資料延遲/);
+    cases.push('fresh_cooldown_and_current_simulated_trim_are_both_visible');
+
+    const grace = await render([market('QQQ'), market('006208.TW', {close: 89,
+        strategy_state: state({flags: ['grace'], grace: {active: true, days_elapsed: 1, days_allowed: 1, days_remaining: 0, exit_after_consecutive_days: 2}})})]);
+    assert.equal(text(grace, 1, '.status-badge'), '多頭狀態');
+    assert.match(text(grace, 1, '.grace-badge'), /年線容忍 1\/1 日/);
+    assert.match(text(grace, 1, '.strategy-explanation'), /連續 2 日才退出/);
+    assert.doesNotMatch(text(grace, 1, '.status-badge'), /安全/);
+    cases.push('annual_grace_is_not_called_safe');
+
+    const defense = await render([market('QQQ'), market('006208.TW', {in_trend: false, step_idx: 0,
+        strategy_state: state({stage: 'defense_deep', label: 'C1 深熊防禦', cooldown: {...cd, active: false, applies_to_current_stage: false}})})]);
+    assert.match(text(defense, 1, '.cooldown-badge'), /防禦階段.*冷卻不適用/);
+    assert.doesNotMatch(text(defense, 1, '.low-bw-val'), /冷卻中/);
+    assert.match(text(defense, 1, '.strategy-explanation'), /C1 深熊防禦/);
+    cases.push('priority_defense_not_falsely_locked_by_step_timer');
+
+    const d1 = await render([market('QQQ', {sma_fast_val: 95, sma_bear_val: 95, strategy_state: state({cooldown: cd, d1: {blocked: true},
+        blocked_actions: [{action: 'step_up', reason: 'd1_filter', label: 'D1 升檔條件未滿足'}]})}), market('006208.TW')]);
+    assert.match(text(d1, 0, '.high-bw-val'), /D1.*冷卻中/);
+    assert.match(text(d1, 0, '.strategy-explanation'), /D1 僅凍結升檔/);
+    assert.match(text(d1, 0, '.high-bw-val'), /D1 凍結/); // 顯示值四捨五入相等，仍以後端 raw 判定為準。
+    cases.push('d1_and_cooldown_coexist');
+
+    const multi = await render([market('QQQ'), market('006208.TW', {strategy_state: state({label: 'Extension 封頂', flags: ['extension', 'bull_accel', 'full'],
+        extension: {capping_active: true, cap: 1.8}, bull_acceleration: {active: true, days_including_data_bar: 17}})})]);
+    assert.match(text(multi, 1, '.strategy-explanation'), /Extension 封頂 1\.8x.*牛初加速.*17.*階梯已滿載/);
+    cases.push('coexisting_flags_are_not_lost_to_stage_priority');
+
+    const accelLast = await render([market('QQQ'), market('006208.TW', {bull_accel_active: true, bull_accel_days_left: 0,
+        strategy_state: state({stage: 'bull_accel', label: '牛初加速', bull_acceleration: {active: true, days_remaining_after_data_bar: 0, days_including_data_bar: 1}})})]);
+    assert.match(text(accelLast, 1, '.accel-badge'), /含資料日餘 1 個市場交易日/);
+    assert.doesNotMatch(text(accelLast, 1, '.accel-badge'), /餘 0/);
+    cases.push('last_acceleration_day_is_one_including_data_bar_not_zero');
+
+    const legacy = market('006208.TW'); delete legacy.strategy_state;
+    const old = await render([market('QQQ'), legacy]);
+    assert.match(text(old, 1, '.cooldown-badge'), /冷卻資訊未提供/);
+    assert.match(text(old, 1, '.low-bw-val'), /冷卻資訊未提供/);
+    assert.doesNotMatch(text(old, 1, '.cooldown-badge'), /餘 \d/);
+    cases.push('legacy_never_invents_cooldown');
+
+    const boundary = await render([market('QQQ'), market('006208.TW', {strategy_state: state({cooldown: {...cd, active: false, remaining_days: 0, elapsed_days: 10}})})]);
+    assert.match(text(boundary, 1, '.cooldown-badge'), /冷卻已結束/);
+    assert.doesNotMatch(text(boundary, 1, '.low-bw-val'), /冷卻中/);
+    cases.push('cooldown_boundary_uses_backend_state');
+    console.log(JSON.stringify({passed: true, cases, samples: {
+        stale_top: stale.global.textContent,
+        stale_delta: text(stale, 1, '.delta-badge'),
+        cooldown_top: cooling.global.textContent,
+        cooldown_sell_channel: text(cooling, 1, '.low-bw-val'),
+        grace_summary: text(grace, 1, '.strategy-explanation'),
+        fallback_top: fallback.global.textContent
+    }}));
+})().catch(error => { console.error(error); process.exitCode = 1; });

@@ -283,13 +283,20 @@ def auto_patch_twse(ticker, df):
 
     for iso_date, rinfo in sorted(parsed_twse_rows.items()):
         ts = pd.Timestamp(iso_date)
-        need_patch = (ts not in df.index and iso_date >= cutoff_date)
+        has_valid_ohlc = False
+        if ts in df.index:
+            existing_ohlc = pd.to_numeric(
+                df.loc[ts].reindex(['Open', 'High', 'Low', 'Close']), errors='coerce'
+            ).to_numpy(dtype=float)
+            has_valid_ohlc = bool(np.isfinite(existing_ohlc).all() and (existing_ohlc > 0).all())
+        # 日期存在但 OHLC 無效仍是待補缺口；一律經同一還原因子驗證後修復。
+        need_patch = (not has_valid_ohlc and iso_date >= cutoff_date)
         need_today_update = (ts in df.index and iso_date == today_str)
         if not (need_patch or need_today_update):
             continue
 
         factor = _resolve_adj_factor(ts, rinfo)
-        if factor is None or factor <= 0:
+        if factor is None or not np.isfinite(factor) or factor <= 0:
             df.attrs['unverified_twse_patch_skipped'] = True
             print(f"⚠️ [Layer 3] 略過 {symbol} {iso_date} 補值：無法驗證除權息調整因子")
             continue
@@ -464,18 +471,28 @@ def fetch_robust_market_data(ticker):
             print(f"⚠️ [Layer 1] yfinance 第 {attempt+1} 次抓取失敗 ({ticker}): {e}")
         time.sleep(1)
 
-    # 第 2 層：若 yfinance 失敗、筆數不足 225、或末筆資料嚴重過期 (>4 天)，嘗試切換 Yahoo Direct JSON API
+    # 第 2 層：以最後完整、已完成 session 判斷新鮮度；只落後一個 session 也嘗試備援。
     need_layer2 = (df is None or len(df) < MIN_REQUIRED_ROWS)
-    if not need_layer2 and len(df) > 0:
-        tmp_idx = pd.to_datetime(df.index).tz_localize(None).normalize()
-        if (expected_session - tmp_idx[-1].date()).days > 4:
-            need_layer2 = True
+    source_last_valid_date = None
+    if df is not None and len(df) > 0:
+        source_ohlc = df[['Open', 'High', 'Low', 'Close']].apply(pd.to_numeric, errors='coerce').to_numpy(dtype=float)
+        source_dates = pd.to_datetime(df.index).tz_localize(None).normalize()
+        source_good = np.isfinite(source_ohlc).all(axis=1) & (source_ohlc > 0).all(axis=1)
+        completed_dates = source_dates[source_good & (source_dates <= pd.Timestamp(expected_session))]
+        if len(completed_dates) > 0:
+            source_last_valid_date = completed_dates.max().date()
+        need_layer2 = need_layer2 or source_last_valid_date is None or source_last_valid_date < expected_session
 
     if need_layer2:
         print(f"🔄 正在啟用第二層防禦 (Yahoo Direct API) 抓取 {ticker}...")
         direct_df = fetch_yahoo_direct(ticker)
         if direct_df is not None and len(direct_df) >= MIN_REQUIRED_ROWS and REQUIRED_COLS.issubset(set(direct_df.columns)):
-            if df is None or len(df) < MIN_REQUIRED_ROWS or direct_df.index[-1] >= df.index[-1]:
+            direct_ohlc = direct_df[['Open', 'High', 'Low', 'Close']].apply(pd.to_numeric, errors='coerce').to_numpy(dtype=float)
+            direct_dates = pd.to_datetime(direct_df.index).tz_localize(None).normalize()
+            direct_good = np.isfinite(direct_ohlc).all(axis=1) & (direct_ohlc > 0).all(axis=1)
+            direct_completed = direct_dates[direct_good & (direct_dates <= pd.Timestamp(expected_session))]
+            direct_last_valid_date = direct_completed.max().date() if len(direct_completed) > 0 else None
+            if direct_last_valid_date is not None and (source_last_valid_date is None or direct_last_valid_date >= source_last_valid_date):
                 df = direct_df
                 source_layer = 'yahoo_direct'
 
@@ -632,8 +649,13 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     accel_left = 0
     below_ma_counter = 0
     pre_bull_on = False
+    last_step_event = None  # 只觀測階梯升/降檔，超標模擬修剪不重設計時。
+    bull_accel_on_data_bar = False
 
     for i in range(len(df)):
+        step_before_bar = step_idx
+        last_step_before_bar = last_action_idx
+        bull_accel_on_data_bar = False
         current_close = df['Close'].iloc[i]
         sma_fast = df['SMA_fast'].iloc[i]
         sma_slow = df['SMA_slow'].iloc[i]
@@ -686,6 +708,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             cur_base = base_leverage
             if bull_acceleration and in_trend and accel_left > 0:
                 cur_base = bull_acceleration.get('accel_base', 1.2)
+                bull_accel_on_data_bar = True
                 accel_left -= 1
 
             req_bear = add_above_bear or (deep_bear_guard and deep_bear_guard.get('add_above_bear', False))
@@ -711,6 +734,13 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     target = min(target, extension_guard['cap'])
                     if target < original_target:
                         ext_guard_active = True
+
+        if last_action_idx != last_step_before_bar:
+            last_step_event = {
+                'date': df.index[i].strftime('%Y-%m-%d'),
+                'kind': 'step_up' if step_idx > step_before_bar else 'step_down',
+                'from_step': int(step_before_bar), 'to_step': int(step_idx),
+            }
 
         # F06: 以真實日曆天數差 (gap_days / 365.0) 計算單市場模擬自然漂移，並遵守 no_buy_down 降檔不補買鐵律
         if i > 0:
@@ -818,147 +848,160 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     deep_bear_active = deep_bear_history[-1] if deep_bear_history else False
     pre_bull_active = pre_bull_history[-1] if pre_bull_history else False
 
-    # === 實戰狀態 (Cases) 專屬戰術說明文案 ===
-    bear_ratio = deep_bear_guard.get('ratio', 0.97) if deep_bear_guard else 0.97
-    bear_w = deep_bear_guard.get('bear_ma', 60) if deep_bear_guard else 60
-    bear_thresh = round(s_ma * bear_ratio, 2)
-    ext_ratio_now = round(float(latest['Close']) / float(latest['SMA_slow']), 4) if float(latest['SMA_slow']) > 0 else 0.0
-    ext_pct_now = round((float(latest['Close']) / float(latest['SMA_slow']) - 1) * 100, 1) if float(latest['SMA_slow']) > 0 else 0.0
-    ext_cap_val = extension_guard['cap'] if extension_guard else 1.8
-
-    if not in_trend:
-        # 【空頭防禦與季線總攻大類】
-        if deep_bear_active and deep_bear_guard:
-            if lev_changed and curr_target < prev_target:
-                explanation = (
-                    f"🚨【深熊二階段減碼 · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                    f"季線 {bear_w}MA ({sma_bear_val}) 已跌破年線 97% 深熊門檻 ({bear_thresh}) 且快線位於季線之下，"
-                    f"確認進入系統性空頭深水區！今日請掛限價單將底倉減半至 {curr_target:.2f}x 保命。"
-                )
-            else:
-                explanation = (
-                    f"🛡️【深熊減半防禦中 · 維持 {curr_target:.2f}x】"
-                    f"中期與長期均線持續空頭排列，維持二階段減半底倉 {curr_target:.2f}x 避險。"
-                    f"無須動作；待快線 ({f_ma}) 重新站上季線 ({sma_bear_val}) 即刻復原常態底倉 {base_leverage:.1f}x。"
-                )
-        elif pre_bull_active and pre_bull_boost is not None:
-            if lev_changed and curr_target > prev_target:
-                explanation = (
-                    f"⚡【季線右側總攻啟動 (Stage 0) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                    f"收盤價 ({cur_p}) 與 {fast_ma}MA 快線 ({f_ma}) 已雙雙站穩季線 {bear_w}MA ({sma_bear_val}) 並突破近 {w_up} 日高點 ({h_bw})！"
-                    f"今日請掛限價單將底倉推升至準牛市總攻檔位 {curr_target:.2f}x，迎戰 {slow_ma}MA 年線 ({s_ma})。"
-                )
-            else:
-                diff_s = round(max(s_ma - cur_p, 0.0), 2)
-                explanation = (
-                    f"⚡【季線右側總攻巡航 (Stage 0) · 維持 {curr_target:.2f}x】"
-                    f"目前已站穩季線 ({sma_bear_val}) 並完成右側突破，維持準牛市總攻底倉 {curr_target:.2f}x。"
-                    f"距離正式站上 {slow_ma}MA 年線 ({s_ma}) 尚差 {diff_s} 點，今日無須動作。"
-                )
-        elif lev_changed and curr_target > prev_target:
-            explanation = (
-                f"🌤️【深熊底部復原 (Stage -1) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                f"短線 {fast_ma}MA ({f_ma}) 已成功站上季線 {bear_w}MA ({sma_bear_val})，空頭最劇烈尋底期結束！"
-                f"今日請掛限價單將底倉由深熊半倉恢復至常態 {curr_target:.2f}x；後續若突破 {w_up} 日高點 ({h_bw}) 將再升至 {pre_bull_boost:.1f}x 總攻。"
-            )
-        elif cur_p < s_ma:
-            if lev_changed and curr_target < prev_target:
-                explanation = (
-                    f"🚨【防禦降槓退回底倉 · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                    f"收盤價 ({cur_p}) 位於 {slow_ma}MA 年線護城河 ({s_ma}) 之下，動能退回常態防守底倉！"
-                    f"今日請於最佳時段掛限價單退回常態底倉 {curr_target:.2f}x，嚴禁盤中手動抄底。"
-                )
-            else:
-                explanation = (
-                    f"🛡️【年線下防禦待命 · 維持 {curr_target:.2f}x】"
-                    f"收盤價距離 {slow_ma}MA 年線尚差 {round(s_ma - cur_p, 2)} 點（目前季線 {sma_bear_val}，深熊線 {bear_thresh}）。"
-                    f"今日無須動作，維持常態底倉 {curr_target:.2f}x 靜待均線修復。"
-                )
-        else:
-            explanation = (
-                f"👀【右側重啟觀察期 · 維持 {curr_target:.2f}x】"
-                f"收盤價 ({cur_p}) 已率先站回年線 ({s_ma}) 之上，惟 {fast_ma}MA 快線 ({f_ma}) 尚差 {round(s_ma - f_ma, 2)} 點完成黃金交叉。"
-                f"今日維持底倉 {curr_target:.2f}x 按兵不動，待雙條件同時滿足即刻重啟多頭。"
-            )
-    else:
-        # 【多頭進攻大類：共 5 個 Cases】
-        if cur_p < s_ma and below_ma_counter <= grace_days:
-            explanation = (
-                f"⚠️【破年線容忍觀察 (第 1/{grace_days} 日) · 暫維 {curr_target:.2f}x】"
-                f"收盤價 ({cur_p}) 首日微幅跌破年線 ({s_ma})，啟動台股防洗盤容忍保護，今日暫不砍倉！"
-                f"明日收盤若未能站回 {s_ma} 之上，將正式確認破線並退回 {base_leverage:.1f}x 底倉。"
-            )
-        elif step_idx == 0:
-            diff_h = round(max(h_bw - cur_p, 0.01), 2)
-            explanation = (
-                f"🚀【多頭起跑待命 (Step 0/{max_idx}) · 目標 {curr_target:.2f}x】"
-                f"年線護城河與快線多頭排列已確立！目前持守底倉 {curr_target:.2f}x，"
-                f"距離第一階 {w_up} 日突破加碼門檻 ({h_bw}) 僅差 {diff_h} 點，突破前不提前追高。"
-            )
-        elif lev_changed and curr_target > prev_target:
-            if step_idx == max_idx:
-                explanation = (
-                    f"🔥【突破滿載加碼 (Step {step_idx}/{max_idx}) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                    f"收盤價 ({cur_p}) 創近 {w_up} 日收盤新高！動能階梯推進至最高滿載檔位。"
-                    f"今日請掛限價單加碼至 {curr_target:.2f}x 天花板；後續不再加買，僅盯 {w_dn} 日下檔減碼線 ({l_bw}) 與修剪線 ({trim_trigger:.2f}x)。"
-                )
-            else:
-                explanation = (
-                    f"📈【順勢突破加碼 (Step {step_idx}/{max_idx}) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                    f"收盤價 ({cur_p}) 成功突破近 {w_up} 日高點 ({h_bw})，趨勢動能確認！"
-                    f"今日請於最佳時段掛限價單將部位推升至 {curr_target:.2f}x（冷卻期 {cooldown} 日後始可再升檔）。"
-                )
-        elif lev_changed and curr_target < prev_target:
-            if ext_guard_active and extension_guard:
-                explanation = (
-                    f"🌡️【乖離過熱鎖利減碼 · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                    f"年線正乖離達 +{ext_pct_now}%（超過 +16% 警戒線），啟動美股過熱保護閥！"
-                    f"今日請掛限價單將槓桿上限主動壓回 {curr_target:.2f}x 鎖住高檔獲利，待乖離回落 ≤16% 再恢復 3.0x 權限。"
-                )
-            else:
-                explanation = (
-                    f"📉【跌破通道減碼 (Step {step_idx}/{max_idx}) · {prev_target:.2f}x ➔ {curr_target:.2f}x】"
-                    f"收盤價 ({cur_p}) 跌破近 {w_dn} 日低點支撐 ({l_bw})，短線動能轉弱。"
-                    f"若你目前帳戶實際槓桿高於 {curr_target:.2f}x，今日請掛限價單減碼壓回 {curr_target:.2f}x 目標。"
-                )
-        else:
-            if ext_guard_active and extension_guard:
-                explanation = (
-                    f"🌡️【多頭過熱冷卻中 (Step {step_idx}/{max_idx}) · 封頂維持 {curr_target:.2f}x】"
-                    f"目前年線正乖離 +{ext_pct_now}%（>16%），加碼上限鎖死於 {ext_cap_val:.1f}x。"
-                    f"今日完全不動作；待股價橫盤或年線跟上使乖離 ≤16% 後，自動解鎖 3.0x 滿載空間。"
-                )
-            elif step_idx == max_idx:
-                explanation = (
-                    f"👑【滿載巡航奔跑中 (Step {step_idx}/{max_idx}) · 維持上限 {curr_target:.2f}x】"
-                    f"已達系統最高槓桿天花板，上方無更高加碼檔位！上漲過程讓槓桿自然衰減、利潤奔跑，絕對不追高補倉；"
-                    f"日常僅需防守 {w_dn} 日下檔減碼線 (<{l_bw}) 與被動超標修剪線 (>{trim_trigger:.2f}x)。"
-                )
-            else:
-                diff_h = round(max(h_bw - cur_p, 0.01), 2)
-                if req_bear and sma_bear_val is not None and f_ma < sma_bear_val:
-                    explanation = (
-                        f"🛡️【季線下整理凍結加碼 (Step {step_idx}/{max_idx}) · 維持 {curr_target:.2f}x】"
-                        f"目前位於年線之上，但快線 {fast_ma}MA ({f_ma}) 尚未站回季線 {bear_w}MA ({sma_bear_val})，"
-                        f"啟動 D1 夾層保護：暫時凍結向上突破升檔，僅防守 {w_dn} 日下檔減碼線 (<{l_bw})；待 {fast_ma}MA 站回 {sma_bear_val} 即解鎖加碼。"
-                    )
-                else:
-                    explanation = (
-                        f"⚡【多頭順勢巡航 (Step {step_idx}/{max_idx}) · 維持 {curr_target:.2f}x】"
-                        f"趨勢穩健推進中，今日目標槓桿不變，無須任何操作。"
-                        f"距下一階 {w_up} 日突破加碼門檻 (>{h_bw}) 差 {diff_h} 點，{w_dn} 日下檔減碼防線設於 <{l_bw}。"
-                    )
-
-    # === 附加狀態尾註（僅在牛初加速啟動時補充） ===
-    bull_accel_active = (accel_left > 0) if bull_acceleration else False
-    bull_accel_days_left = accel_left if bull_acceleration else 0
-    if bull_accel_active:
-        explanation += f" 🚀【台股牛初加速生效中：底倉基準升為 {cur_base:.1f}x，剩餘 {bull_accel_days_left} 交易日】"
-
+    # 狀態輸出只觀測既有決策；不改 target、last_action_idx、accel_left 或 sim_L。
     latest_date_str = latest.name.strftime('%Y-%m-%d')
     expected_sess = df_attrs.get('expected_session', latest_date_str)
     is_stale = bool(df_attrs.get('is_stale', False))
     stale_days = int(df_attrs.get('stale_days', 0))
+    bear_w = deep_bear_guard.get('bear_ma', 60) if deep_bear_guard else 60
+    ext_cap_val = extension_guard['cap'] if extension_guard else 1.8
+    raw_close = float(latest['Close'])
+    raw_fast = float(latest['SMA_fast'])
+    raw_slow = float(latest['SMA_slow'])
+    raw_bear = float(latest['SMA_bear']) if 'SMA_bear' in latest else None
+    ext_ratio_raw = raw_close / raw_slow if raw_slow > 0 else 0.0
+    ext_ratio_now = round(ext_ratio_raw, 4)
+    ext_pct_now = round((ext_ratio_raw - 1) * 100, 1)
+    breakout_up_now = bool(raw_close > float(latest['High_bw']))
+    breakout_down_now = bool(raw_close < float(latest['Low_bw']))
+    d1_enabled = bool(add_above_bear or (deep_bear_guard and deep_bear_guard.get('add_above_bear', False)))
+    d1_blocked = bool(in_trend and d1_enabled and raw_bear is not None and raw_fast < raw_bear)
+    extension_above = bool(in_trend and extension_guard and ext_ratio_raw > extension_guard['threshold'])
+    grace_active = bool(in_trend and raw_close < raw_slow and below_ma_counter <= grace_days)
+    recovered = bool(not in_trend and not deep_bear_active and not pre_bull_active and raw_bear is not None
+                     and (raw_fast >= raw_bear or (len(deep_bear_history) > 1 and deep_bear_history[-2])))
+
+    elapsed = int((len(df) - 1) - last_action_idx) if last_step_event is not None else None
+    remaining = max(0, int(cooldown) - elapsed) if elapsed is not None else 0
+    timer_active = bool(last_step_event is not None and remaining > 0)
+    cooldown_active = bool(in_trend and timer_active)
+    step_event_on_bar = bool(last_step_event and last_action_idx == len(df) - 1)
+    cooldown_blocked_on_bar = bool(in_trend and (len(df) - 1 - last_step_before_bar < cooldown))
+    cooldown_state = {
+        'active': cooldown_active, 'timer_active': timer_active,
+        'applies_to_current_stage': bool(in_trend), 'total_days': int(cooldown),
+        'elapsed_days': elapsed, 'remaining_days': int(remaining),
+        'last_step_event_date': last_step_event['date'] if last_step_event else None,
+        'last_step_event_kind': last_step_event['kind'] if last_step_event else None,
+        'last_step_from': last_step_event['from_step'] if last_step_event else None,
+        'last_step_to': last_step_event['to_step'] if last_step_event else None,
+        'step_event_on_data_bar': step_event_on_bar, 'blocked_on_data_bar': cooldown_blocked_on_bar,
+    }
+    # active依本bar是否實際採加速底倉，含accel_left剛減到0的最後一天。
+    bull_accel_active = bool(bull_accel_on_data_bar)
+    bull_accel_days_left = int(accel_left) if bull_acceleration else 0
+    acceleration_state = {
+        'active': bull_accel_active,
+        'days_remaining_after_data_bar': bull_accel_days_left,
+        'days_including_data_bar': bull_accel_days_left + int(bull_accel_active),
+    }
+    exit_reasons = []
+    if raw_fast < raw_slow:
+        exit_reasons.append('fast_below_annual')
+    if below_ma_counter > grace_days:
+        exit_reasons.append('annual_grace_exhausted')
+    if deep_bear_active:
+        exit_reasons.append('deep_bear')
+    blocked_actions = []
+    for action, trigger in (('step_up', breakout_up_now), ('step_down', breakout_down_now)):
+        reasons = []
+        if not in_trend:
+            reasons.append(('not_in_trend', '防禦狀態，階梯升降不啟用'))
+        else:
+            if cooldown_blocked_on_bar:
+                reasons.append(('cooldown', '階梯冷卻同時限制升檔與降檔'))
+            if action == 'step_up' and d1_blocked:
+                reasons.append(('d1_filter', f'D1濾網：{fast_ma}MA仍低於{bear_w}MA，只限制階梯升檔'))
+            if action == 'step_up' and step_before_bar >= max_idx:
+                reasons.append(('max_step', '已在最高階梯'))
+            if action == 'step_down' and step_before_bar <= 0:
+                reasons.append(('base_step', '已在第0階梯'))
+        blocked_actions.extend({'action': action, 'reason': reason, 'label': text,
+                                'trigger_met': trigger, 'on_data_bar': True}
+                               for reason, text in reasons)
+
+    if deep_bear_active:
+        stage, stage_label = 'defense_deep', 'C1深熊防禦'
+    elif pre_bull_active:
+        stage, stage_label = 'e3b', 'E3b年線下季線總攻'
+    elif recovered:
+        stage, stage_label = 'defense_recovered', '常態防禦／季線復原'
+    elif not in_trend:
+        stage, stage_label = 'defense', '常態防禦底倉'
+    elif ext_guard_active:
+        stage, stage_label = 'extension', 'Extension Guard過熱封頂'
+    elif bull_accel_active:
+        stage, stage_label = 'bull_accel', '牛初加速'
+    elif d1_blocked:
+        stage, stage_label = 'd1_frozen', 'D1季線濾網限制升檔'
+    elif step_idx == max_idx:
+        stage, stage_label = 'full', '最高階梯'
+    else:
+        stage, stage_label = 'bull', '多頭階梯'
+    flags = [flag for flag, active in (
+        ('cooldown', cooldown_active), ('grace', grace_active), ('d1_filter', d1_blocked),
+        ('extension', ext_guard_active), ('extension_threshold', extension_above),
+        ('bull_accel', bull_accel_active), ('full', bool(in_trend and step_idx == max_idx)),
+        ('c1_recovered', recovered)) if active]
+    state_label = stage_label
+    if cooldown_active:
+        direction = '減碼' if last_step_event['kind'] == 'step_down' else '加碼'
+        state_label += f'｜{direction}後階梯冷卻'
+    strategy_state = {
+        'schema_version': 1, 'asof_date': latest_date_str,
+        'asof_label': f'截至{latest_date_str}資料日狀態', 'stage': stage, 'label': state_label,
+        'flags': flags, 'cooldown': cooldown_state,
+        'grace': {'active': grace_active, 'days_elapsed': int(below_ma_counter),
+                  'days_allowed': int(grace_days),
+                  'days_remaining': max(0, int(grace_days) - int(below_ma_counter)),
+                  'exit_after_consecutive_days': int(grace_days) + 1},
+        'blocked_actions': blocked_actions,
+        'priority_defense': {'active': bool(not in_trend), 'reasons': exit_reasons,
+                             'bypasses_step_cooldown': True},
+        'triggers': {'breakout_up': breakout_up_now, 'breakout_down': breakout_down_now},
+        'bull_acceleration': acceleration_state,
+        'extension': {'threshold_exceeded': extension_above, 'capping_active': bool(ext_guard_active),
+                      'cap': float(ext_cap_val) if extension_guard else None},
+        'd1': {'enabled': d1_enabled, 'blocked': d1_blocked},
+        'signal_change_on_data_bar': bool(lev_changed),
+        'excess_trim_on_data_bar': bool(not lev_changed and last_excess_trim_event is not None
+                                      and last_excess_trim_event['date'] == latest_date_str
+                                      and last_excess_trim_event['days_ago'] == 0),
+    }
+    notes = [f'截至{latest_date_str}資料日狀態：{state_label}。',
+             f'策略目標{curr_target:.2f}x，階梯{step_idx}/{max_idx}。']
+    if step_event_on_bar:
+        direction = '升檔' if last_step_event['kind'] == 'step_up' else '降檔'
+        notes.append(f'該資料日階梯{direction}已形成，階梯冷卻從此日重新計時。')
+    if cooldown_active:
+        notes.append(f'最後階梯動作{last_step_event["date"]}，已過{elapsed}/{int(cooldown)}個市場交易日，'
+                     f'尚餘{remaining}日；冷卻期間階梯升、降檔皆受限制。')
+    if grace_active:
+        notes.append(f'收盤低於年線第{below_ma_counter}/{grace_days}個容忍交易日；'
+                     f'連續{grace_days + 1}日低於年線或快線低於年線，則優先轉防禦。')
+    if not in_trend:
+        if deep_bear_active:
+            notes.append(f'季線低於年線{deep_bear_guard.get("ratio", .97):.2f}倍且快線低於季線，採深熊底倉。')
+        elif pre_bull_active:
+            notes.append(f'年線下季線總攻已啟動；維持須收盤與快線守住{bear_w}MA且未觸發深熊。')
+        else:
+            notes.append('依已驗收防禦條件採常態底倉，未符合季線總攻啟動條件。')
+    if d1_blocked:
+        notes.append(f'D1：{fast_ma}MA低於{bear_w}MA，階梯升檔另被濾網阻擋；階梯降檔仍須通道與冷卻條件。')
+    if extension_above:
+        notes.append(f'年線乖離超過{extension_guard["threshold"]:.2f}倍，適用{ext_cap_val:.2f}x目標上限；'
+                     '此上限不重設階梯冷卻，也不阻止底層階梯狀態推進。')
+    if bull_accel_active:
+        notes.append(f'本資料日使用牛初加速底倉{bull_acceleration.get("accel_base", 1.2):.1f}x，'
+                     f'含本日尚{acceleration_state["days_including_data_bar"]}日，本日後尚{bull_accel_days_left}日。')
+    if in_trend and step_idx == max_idx:
+        notes.append('已在最高階梯；階梯減碼仍須跌破通道且冷卻完成。')
+    notes.append('年線破線／快線低於年線的防禦及深熊底倉優先，均不受階梯冷卻限制；'
+                 '模擬自然槓桿超標修剪不重設階梯計時。')
+    if is_stale:
+        notes.append(f'行情尚未更新至預期交易日{expected_sess}，上述僅為舊資料狀態。')
+    notes.append('實帳是否買賣及淨額須依最新淨值、部位與入金試算確認。')
+    explanation = ' '.join(notes)
 
     # === 組合回傳資料 ===
     return {
@@ -989,6 +1032,11 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'low_bw': l_bw,
         'base_leverage': base_leverage,
         'max_leverage': max_leverage,
+        'strategy_state': strategy_state,
+        'cooldown_active': cooldown_active,
+        'cooldown_days_elapsed': elapsed,
+        'cooldown_days_remaining': int(remaining),
+        'cooldown_last_step_event_date': cooldown_state['last_step_event_date'],
         'explanation': explanation,
         'ext_guard_active': ext_guard_active,
         'ext_cap': ext_cap_val if extension_guard else None,

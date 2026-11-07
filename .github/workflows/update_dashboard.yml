@@ -67,8 +67,10 @@ jobs:
         with:
           node-version: '24'
 
-      - name: 執行離線前端事件測試
-        run: node tests/test_event_ui.js
+      - name: 執行離線前端事件與策略階段測試
+        run: |
+          node tests/test_event_ui.js
+          node tests/test_strategy_state_ui.js
 
       - name: 還原前次已送達之推播事件去重狀態 (S03 跨 Run 去重狀態持久化)
         uses: actions/cache/restore@v4

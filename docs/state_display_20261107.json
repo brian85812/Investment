@@ -1,0 +1,144 @@
+{
+  "date": "2026-11-07",
+  "parent_commit": "ee3ee8badb044c217e0dfc999d0145feb87546ed",
+  "python_tests": 44,
+  "strategy_node_cases": 15,
+  "event_node_cases": 6,
+  "original_node_cases": 13,
+  "all_checks_passed": true,
+  "original_fixture_adapters": {
+    "python": {
+      "replacements": 1,
+      "before": "jsonify=lambda x: x",
+      "after": "jsonify=_JsonResponse",
+      "assert_AST_unchanged": true
+    },
+    "node": {
+      "replacements": 3,
+      "before": "assert(r3Trim.card_field_values[0]['.delta-badge'].includes('今日模擬修剪'), 'F11 failed: card delta badge should highlight trim today');",
+      "after": "assert(r3Trim.card_field_values[0]['.delta-badge'].includes('本期模擬修剪（超標'), 'F11 failed: card delta badge should highlight simulated excess trim');",
+      "date_before": "assert(r1.global_date.includes('跨市場日期不同步'), 'F12 failed: header should flag cross-market date mismatch');",
+      "date_after": "assert(r1.global_date.includes('各市場交易日分列'), 'F12 failed: header should list independent market sessions');",
+      "global_before": "assert(r3Trim.global_action.includes('今日觸發模擬超標修剪'), 'F11 failed: global pill should warn on simulated trim today');",
+      "global_after": "assert(r3Trim.global_action.includes('資料日觸發模擬超標修剪'), 'F11 failed: global pill should warn on simulated trim on the data date');",
+      "both_market_dates_assert_preserved": true,
+      "extra_warning_class_assertions": 2,
+      "original_banner_assert_preserved": true
+    },
+    "reason": "Response mock及既有今日/本期文案適配；本輪精確化市場日期分列與資料日觸發文案，兩日期與所有case保留，原source/JSON未改。"
+  },
+  "compatible_daily_trace_rows": 6343,
+  "compatibility_groups": 18,
+  "unchanged_core_AST": {
+    "US_P": true,
+    "TW_P": true,
+    "target_lev": true,
+    "target_lev_exp": true,
+    "step_monthly_dca": true,
+    "predict_6m_weight": true
+  },
+  "frozen_cache_sha256": "3ef91f0fc386b06561cb62d48639912dba374443e5a69d7391195b2c52fe24e3",
+  "doc_mirrors": {
+    "Gemini_Handoff_Master_Prompt.md": true,
+    "實戰手冊_Strategy_Rules.md": true,
+    "完整回測紀錄_Backtest_Records.md": true
+  },
+  "source_sha256": {
+    "app.py": "310f3ead3cea38ccd936b3372b31caa40bf190939198843b5aab5d920a4ec6ad",
+    "build_static.py": "78df914b82dc3b27b3a4b089ce21ecc24bda13537923dc2872979744559cf6fa",
+    "static/script.js": "792917c46bfef5d215ad8284e3f28595d93466336a69f0722c783d2a6c3a2d39",
+    "static/style.css": "aa902ace42bb7ba1cfac915ae614343c250a305befe37b3e84f81a5bc466ab40",
+    "templates/index.html": "a85f1b6366d769a8620884c0b4f9a38069c68b5836a885154193be1a29ae0362",
+    ".github/workflows/update_dashboard.yml": "4ae6303e4b834d8bcde2cd4058ce76796da809c823a4bae7dafea23bb448fcc0",
+    "tests/test_market_data_freshness.py": "0fe6679ce88060a3e70a65b8dacea1e42c8d70b1f44b00f8f884db33687c229a",
+    "tests/test_strategy_states.py": "66647ba4186c1afc04296d2c4ec843d7b4f15421cc4eec5c78b332da37491d4a",
+    "tests/test_strategy_state_ui.js": "cb9ceeeb01e271558e75800f5295c811105f305cd67eab04cc8ee6d88f9c003e",
+    "tests/test_notifications.py": "9de8bd26429b3a974a8af3558e6de8bfd7a69e04ffbb2604d50f0f72be1526e7",
+    "scratch/engine.py": "8a672c7ec7ad6b2d08dd0605b69620b89a8c4e14e163e8a6c03579b824f4ce5e",
+    "scratch/new_experiments_suite.py": "0ff3f6cb62843bc947d5bb4b0990009cbd3923ad506d2d01262fb06593e3e48d"
+  },
+  "live_taiwan": {
+    "date": "2026-11-06",
+    "expected_session": "2026-11-06",
+    "source_layer": "yahoo_direct",
+    "close": 210.1,
+    "target_today": 2.8,
+    "strategy_state": {
+      "schema_version": 1,
+      "asof_date": "2026-11-06",
+      "asof_label": "截至2026-11-06資料日狀態",
+      "stage": "bull",
+      "label": "多頭階梯｜減碼後階梯冷卻",
+      "flags": [
+        "cooldown"
+      ],
+      "cooldown": {
+        "active": true,
+        "timer_active": true,
+        "applies_to_current_stage": true,
+        "total_days": 10,
+        "elapsed_days": 5,
+        "remaining_days": 5,
+        "last_step_event_date": "2026-10-30",
+        "last_step_event_kind": "step_down",
+        "last_step_from": 4,
+        "last_step_to": 3,
+        "step_event_on_data_bar": false,
+        "blocked_on_data_bar": true
+      },
+      "grace": {
+        "active": false,
+        "days_elapsed": 0,
+        "days_allowed": 1,
+        "days_remaining": 1,
+        "exit_after_consecutive_days": 2
+      },
+      "blocked_actions": [
+        {
+          "action": "step_up",
+          "reason": "cooldown",
+          "label": "階梯冷卻同時限制升檔與降檔",
+          "trigger_met": false,
+          "on_data_bar": true
+        },
+        {
+          "action": "step_down",
+          "reason": "cooldown",
+          "label": "階梯冷卻同時限制升檔與降檔",
+          "trigger_met": true,
+          "on_data_bar": true
+        }
+      ],
+      "priority_defense": {
+        "active": false,
+        "reasons": [],
+        "bypasses_step_cooldown": true
+      },
+      "triggers": {
+        "breakout_up": false,
+        "breakout_down": true
+      },
+      "bull_acceleration": {
+        "active": false,
+        "days_remaining_after_data_bar": 0,
+        "days_including_data_bar": 0
+      },
+      "extension": {
+        "threshold_exceeded": false,
+        "capping_active": false,
+        "cap": null
+      },
+      "d1": {
+        "enabled": false,
+        "blocked": false
+      },
+      "signal_change_on_data_bar": false,
+      "excess_trim_on_data_bar": true
+    }
+  },
+  "live_build_only": "passed; no Telegram",
+  "historical_job_payloads": "Not retrieved; current actual payloads replayed with fixed clocks",
+  "local_visual_preview": "Not completed: IAB localhost timed out and native browser window minimized",
+  "frontend_validation": "Actual script.js in Node VM, 15 strategy + 6 event cases and actual live JSON",
+  "remote_deployment": "Refer to Actions run for the resulting commit"
+}

@@ -30,6 +30,81 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    const marketLabel = ticker => ticker === 'QQQ' ? '美股' : ticker === '006208.TW' ? '台股' : ticker;
+    const shortDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') ? value.slice(5).replace('-', '/') : (value || '未知');
+    function getFreshness(market) {
+        const status = String(market.data_status || '');
+        const fallback = Boolean(market.fallback_used || status.startsWith('fallback'));
+        const datedLag = /^\d{4}-\d{2}-\d{2}$/.test(market.date || '')
+            && /^\d{4}-\d{2}-\d{2}$/.test(market.expected_session || '') && market.date < market.expected_session;
+        const stale = Boolean(market.is_stale || status === 'stale' || status === 'fallback_stale' || datedLag);
+        const other = status && !['ok', 'stale', 'fallback', 'fallback_stale'].includes(status);
+        const issues = [];
+        if (datedLag) issues.push(`${marketLabel(market.ticker)}資料延遲：${shortDate(market.date)}，應${shortDate(market.expected_session)}`);
+        else if (stale && !fallback) issues.push(`${marketLabel(market.ticker)}資料新鮮度未確認（資料${shortDate(market.date)}，應有日期待核）`);
+        if (fallback) issues.push(`${marketLabel(market.ticker)}來源失敗，使用備援資料（截至${shortDate(market.date)}）`);
+        if (other) issues.push(`${marketLabel(market.ticker)}資料來源狀態：${status}`);
+        return {stale, fallback, blocked: Boolean(stale || fallback || other), issues};
+    }
+
+    function getStrategyState(market) {
+        const state = market.strategy_state;
+        return state && state.schema_version === 1 ? state : null;
+    }
+
+    function cooldownText(state) {
+        if (!state || !state.cooldown) return '冷卻資訊未提供（舊版資料）';
+        const cd = state.cooldown;
+        if (cd.active) return `${cooldownDirection(cd)} · 餘 ${cd.remaining_days} 個市場交易日`;
+        if (cd.timer_active && !cd.applies_to_current_stage) return '防禦階段 · 階梯冷卻不適用';
+        return '階梯冷卻已結束';
+    }
+
+    function cooldownDirection(cd) {
+        const before = cd.last_step_from, after = cd.last_step_to;
+        if (before != null && after != null && Number.isFinite(Number(before)) && Number.isFinite(Number(after))) {
+            if (Number(after) < Number(before)) return '減碼後階梯冷卻中';
+            if (Number(after) > Number(before)) return '加碼後階梯冷卻中';
+        }
+        if (cd.last_step_event_kind === 'step_down') return '減碼後階梯冷卻中';
+        if (cd.last_step_event_kind === 'step_up') return '加碼後階梯冷卻中';
+        return '階梯冷卻中';
+    }
+
+    function channelState(state, action) {
+        if (!state || !state.cooldown) return '冷卻資訊未提供';
+        const reasons = (state.blocked_actions || []).filter(item => item.action === action
+            && !(state.cooldown && state.cooldown.active && item.reason === 'cooldown')).map(item => item.label);
+        if (state.cooldown && state.cooldown.active) {
+            reasons.unshift(`${cooldownDirection(state.cooldown)}，餘 ${state.cooldown.remaining_days} 個市場交易日`);
+        } else reasons.unshift(state.cooldown.applies_to_current_stage ? '冷卻已結束' : '防禦轉換不受階梯冷卻限制');
+        if (state.triggers && state.triggers[action === 'step_up' ? 'breakout_up' : 'breakout_down']) {
+            reasons.push(action === 'step_up' ? '資料日已突破通道' : '資料日已跌破通道');
+        }
+        return [...new Set(reasons)].join('；');
+    }
+
+    function strategySummary(market, state, freshness, changed, trimmed) {
+        const parts = [`截至 ${market.date} 資料日：${state ? state.label : (market.in_trend ? '多頭狀態' : '防禦狀態')}`];
+        if (state) {
+            parts.push(cooldownText(state));
+            if (state.cooldown && state.cooldown.step_event_on_data_bar) parts.push('資料日階梯動作已生效，新冷卻自該動作起算');
+            if (state.grace && state.grace.active) parts.push(`年線容忍 ${state.grace.days_elapsed}/${state.grace.days_allowed} 日（連續 ${state.grace.exit_after_consecutive_days} 日才退出）`);
+            if (state.d1 && state.d1.blocked) parts.push('D1 僅凍結升檔，減碼與防禦依原規則');
+            if (state.extension && state.extension.capping_active) parts.push(`Extension 封頂 ${state.extension.cap.toFixed(1)}x`);
+            if (state.bull_acceleration && state.bull_acceleration.active) parts.push(`牛初加速（含資料日餘 ${state.bull_acceleration.days_including_data_bar} 個市場交易日）`);
+            if ((state.flags || []).includes('full')) parts.push('階梯已滿載');
+            if (state.priority_defense && state.priority_defense.bypasses_step_cooldown) parts.push('年線／深熊優先防禦不受階梯冷卻限制');
+        } else {
+            parts.push('舊版資料未提供獨立階段與冷卻計數');
+        }
+        if (freshness.blocked) parts.push('資料待更新；舊訊號僅供歷史參考，暫不提供本期調倉指示');
+        else if (changed) parts.push('資料日有新目標變更；實帳是否調整依部位試算');
+        else if (trimmed) parts.push('資料日有模擬超標修剪；請另核實帳');
+        else parts.push('截至資料日無新目標變更；實帳超過目標 +0.15x 仍須另核');
+        return parts.join('；') + '。';
+    }
+
     function fetchData(retryCount = 0) {
         fetch(DATA_API_URL + '?t=' + new Date().getTime())
             .then(res => {
@@ -63,28 +138,35 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 let anyLevChanged = false;
                 let anyTrimToday = false;
-                let anyStaleOrFallback = !hasBothRequired;
+                const dataIssues = ['QQQ', '006208.TW'].filter(ticker => !seenTickers.has(ticker))
+                    .map(ticker => `${marketLabel(ticker)}市場資料缺失`);
+                if (!hasBothRequired && dataIssues.length === 0) dataIssues.push('市場資料結構異常（重複或額外市場）');
                 const marketDates = [];
+                const stateRestrictions = [];
 
                 validMarkets.forEach(market => {
                     if (market.date) {
                         const shortLabel = market.ticker === 'QQQ' ? 'US' : (market.ticker === '006208.TW' ? 'TW' : market.ticker);
                         marketDates.push({ label: shortLabel, ticker: market.ticker, date: market.date });
                     }
-                    const targetChangedToday = Number(market.target_today).toFixed(2)
+                    const freshness = getFreshness(market);
+                    const state = getStrategyState(market);
+                    if (state && (state.flags || []).some(flag => ['cooldown', 'grace', 'd1_filter', 'extension', 'extension_threshold'].includes(flag))) {
+                        const restriction = state.cooldown && state.cooldown.active ? cooldownText(state) : state.label;
+                        stateRestrictions.push(`${marketLabel(market.ticker)}${restriction}；目標 ${market.target_today.toFixed(2)}x`);
+                    }
+                    const targetChangedToday = !freshness.blocked && Number(market.target_today).toFixed(2)
                         !== Number(market.target_yesterday).toFixed(2);
                     if (targetChangedToday) anyLevChanged = true;
                     const events = getMarketEvents(market);
 
                     const isTrimToday = Boolean(
-                        !targetChangedToday && events.excess &&
+                        !freshness.blocked && !targetChangedToday && events.excess &&
                         events.excess.date === market.date && events.excess.days_ago === 0
                     );
                     if (isTrimToday) anyTrimToday = true;
 
-                    if (market.is_stale || market.fallback_used || (market.data_status && market.data_status !== 'ok')) {
-                        anyStaleOrFallback = true;
-                    }
+                    dataIssues.push(...freshness.issues);
 
                     if (market.ticker === 'QQQ' && market.close) {
                         window.latestQqqClose = market.close;
@@ -111,10 +193,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const badge = clone.querySelector('.status-badge');
                     if (market.in_trend) {
-                        badge.textContent = '🟢 220MA 多頭安全區';
+                        badge.textContent = '多頭狀態';
                         badge.classList.add('bull');
                     } else {
-                        badge.textContent = '🔴 破年線防禦區';
+                        badge.textContent = '防禦狀態';
                         badge.classList.add('bear');
                     }
 
@@ -127,7 +209,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     const accelBadge = clone.querySelector('.accel-badge');
                     if (market.bull_accel_active) {
-                        accelBadge.textContent = `🚀 牛初加速 1.2x (餘 ${market.bull_accel_days_left}d)`;
+                        const accelState = state && state.bull_acceleration;
+                        const daysText = accelState && Number.isFinite(accelState.days_including_data_bar)
+                            ? `含資料日餘 ${accelState.days_including_data_bar} 個市場交易日`
+                            : `資料日後餘 ${market.bull_accel_days_left} 個市場交易日`;
+                        accelBadge.textContent = `🚀 牛初加速 1.2x (${daysText})`;
                         accelBadge.classList.remove('hidden');
                     } else if (market.pre_bull_active) {
                         accelBadge.textContent = `⚡ E3b 季線總攻 (${market.target_today.toFixed(1)}x)`;
@@ -139,14 +225,32 @@ document.addEventListener('DOMContentLoaded', () => {
                         deepBadge.classList.remove('hidden');
                     }
                     const staleBadge = clone.querySelector('.stale-badge');
-                    if (staleBadge && (market.is_stale || market.fallback_used)) {
-                        staleBadge.textContent = `⚠️ 資料延遲 (${market.date} vs 應有 ${market.expected_session || '--'})`;
+                    if (staleBadge && freshness.blocked) {
+                        staleBadge.textContent = `⚠️ ${freshness.issues.join('；')}`;
                         staleBadge.classList.remove('hidden');
+                    }
+                    const cdBadge = clone.querySelector('.cooldown-badge');
+                    if (cdBadge) {
+                        cdBadge.textContent = `⏳ ${cooldownText(state)}`;
+                        cdBadge.classList.remove('hidden');
+                    }
+                    const graceBadge = clone.querySelector('.grace-badge');
+                    if (graceBadge && state && state.grace && state.grace.active) {
+                        graceBadge.textContent = `年線容忍 ${state.grace.days_elapsed}/${state.grace.days_allowed} 日`;
+                        graceBadge.classList.remove('hidden');
+                    }
+                    const stageBadge = clone.querySelector('.stage-badge');
+                    if (stageBadge && state) {
+                        stageBadge.textContent = state.label;
+                        stageBadge.classList.remove('hidden');
                     }
 
                     // 今日動作對比 (F11: 區分換檔、當日觸發模擬超標修剪、一般維持)
                     const deltaBadge = clone.querySelector('.delta-badge');
-                    if (targetChangedToday) {
+                    if (freshness.blocked) {
+                        deltaBadge.textContent = `截至 ${market.date}：${market.target_today.toFixed(2)}x（待更新）`;
+                        deltaBadge.classList.add('hold');
+                    } else if (targetChangedToday) {
                         deltaBadge.textContent = `⚡ 目標變更 ${market.target_yesterday.toFixed(2)}x ➔ ${market.target_today.toFixed(2)}x`;
                         deltaBadge.classList.add('change');
                     } else if (isTrimToday) {
@@ -176,7 +280,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     // 2x2 技術防線矩陣
                     const highBwElem = clone.querySelector('.high-bw-val');
-                    const isD1Frozen = (market.ticker === 'QQQ') && market.in_trend && market.sma_bear_val && (market.sma_fast_val < market.sma_bear_val);
+                    const isD1Frozen = state && state.d1 ? state.d1.blocked
+                        : (market.ticker === 'QQQ') && market.in_trend && market.sma_bear_val && (market.sma_fast_val < market.sma_bear_val);
                     if (!market.in_trend) {
                         if (market.pre_bull_active) {
                             const bearGuardVal = (market.sma_bear_val || market.sma_slow_val).toFixed(1);
@@ -209,6 +314,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     } else {
                         lowBwElem.textContent = `< ${market.low_bw.toFixed(2)}`;
                     }
+                    // 價格門檻與狀態並列；冷卻計數只取後端逐市場 bar 的正式狀態。
+                    highBwElem.textContent += ` ｜ ${channelState(state, 'step_up')}`;
+                    lowBwElem.textContent += ` ｜ ${channelState(state, 'step_down')}`;
+                    if (freshness.blocked) {
+                        highBwElem.textContent += '（截至舊資料日，待更新）';
+                        lowBwElem.textContent += '（截至舊資料日，待更新）';
+                    }
 
                     clone.querySelector('.fast-slow-ma').textContent = `${market.sma_fast_val.toFixed(1)} / ${market.sma_slow_val.toFixed(1)}`;
                     const c1Thresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(1);
@@ -218,7 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const fmtEvent = (evt, legacy) => {
                         if (!evt) return legacy ? '舊版未分列；等待資料更新' : '尚無獨立紀錄';
-                        const dTag = evt.days_ago === 0 ? '本期' : `${evt.days_ago}交易日前`;
+                        const dTag = evt.days_ago === 0 ? '資料日當期' : `${evt.days_ago}交易日前（相對資料日）`;
                         return `${evt.date} (${dTag}) ${evt.from_lev.toFixed(2)}x➔${evt.to_lev.toFixed(2)}x [${evt.type}]`;
                     };
                     const lastActElem = clone.querySelector('.last-action-val');
@@ -230,7 +342,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         lastTrimElem.textContent = fmtEvent(events.excess, events.legacyExcess);
                     }
 
-                    clone.querySelector('.strategy-explanation').textContent = market.explanation;
+                    clone.querySelector('.strategy-explanation').textContent = strategySummary(market, state, freshness, targetChangedToday, isTrimToday);
 
                     // 實戰部位與 DCA 試算器 (F04/F05/F11/F20: 100% 對齊 engine.run Step 4 單一淨指令；缺欄位時嚴禁反推實質槓桿或確定淨單)
                     const equityInput = clone.querySelector('.equity-input');
@@ -242,6 +354,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     const savedPill = clone.querySelector('.saved-lev-pill');
                     const calcDrawer = clone.querySelector('.calc-drawer');
                     const savedMetaNote = clone.querySelector('.saved-meta-note');
+                    const freshnessNote = clone.querySelector('.calc-freshness-note');
+                    if (freshnessNote && freshness.blocked) {
+                        freshnessNote.textContent = `${freshness.issues.join('；')}。保留輸入，暫停確定調倉試算，待最新資料更新。`;
+                        freshnessNote.classList.remove('hidden');
+                    }
 
                     function syncSessionFormState() {
                         sessionFormState.set(market.id, {
@@ -404,6 +521,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     function evaluateInputs(shouldPersistReal) {
                         syncSessionFormState();
+                        if (freshness.blocked) {
+                            if (shouldPersistReal) saveState(true);
+                            resultBox.classList.remove('hidden');
+                            savedPill.classList.remove('hidden', 'ok');
+                            savedPill.classList.add('danger');
+                            savedPill.textContent = '資料待更新（不提供確定淨單）';
+                            summaryDiv.textContent = `僅供截至 ${market.date} 的舊資料參考：目標 ${market.target_today.toFixed(2)}x`;
+                            instructionDiv.textContent = '已保留本頁輸入；資料新鮮度未通過，請待最新資料更新後重新核對實帳，暫不提供買賣指令。';
+                            return;
+                        }
                         const eqVal = equityInput.value.trim();
                         const posVal = positionInput.value.trim();
                         const equity = parseFloat(eqVal);
@@ -466,24 +593,29 @@ document.addEventListener('DOMContentLoaded', () => {
                     const pairsStr = marketDates.map(m => `${m.label}: ${m.date}`).join(' ｜ ');
                     dataDateTag.textContent = allSameDate
                         ? `EOD: ${marketDates[0].date} (${pairsStr})`
-                        : `EOD: ${pairsStr} ⚠️ 跨市場日期不同步`;
+                        : `EOD: ${pairsStr}（各市場交易日分列）`;
                 } else if (marketDates.length === 1) {
                     dataDateTag.textContent = `EOD: ${marketDates[0].label} ${marketDates[0].date} ⚠️ 單一市場缺失`;
                 }
 
                 // F03/F11: 頂部全域動作膠囊優先順序
-                if (anyStaleOrFallback) {
-                    globalActionPill.textContent = '⚠️ 部分市場資料延遲或缺失 · 請核對卡片收盤日期';
+                if (dataIssues.length) {
+                    globalActionPill.textContent = `⚠️ ${dataIssues.join(' ｜ ')} · 受影響市場暫不提供本期調倉指示`;
                     globalActionPill.className = 'action-pill warn';
                 } else if (anyLevChanged) {
-                    globalActionPill.textContent = '⚡ 今日目標槓桿變動 · 請掛限價單調倉';
+                    globalActionPill.textContent = '⚡ 資料日有目標槓桿變動 · 請依實帳部位核對';
+                    if (stateRestrictions.length) globalActionPill.textContent += ` ｜ ${stateRestrictions.join(' ｜ ')}`;
                     globalActionPill.className = 'action-pill warn';
                 } else if (anyTrimToday) {
-                    globalActionPill.textContent = '⚠️ 今日觸發模擬超標修剪 · 請核對實帳槓桿是否突破修剪線';
+                    globalActionPill.textContent = '⚠️ 資料日觸發模擬超標修剪 · 請核對實帳槓桿是否突破修剪線';
+                    if (stateRestrictions.length) globalActionPill.textContent += ` ｜ ${stateRestrictions.join(' ｜ ')}`;
+                    globalActionPill.className = 'action-pill warn';
+                } else if (stateRestrictions.length) {
+                    globalActionPill.textContent = `${stateRestrictions.join(' ｜ ')} · 截至資料日無新增目標變更`;
                     globalActionPill.className = 'action-pill warn';
                 } else {
-                    globalActionPill.textContent = '🟢 今日目標槓桿不變 · 讓利潤奔跑';
-                    globalActionPill.className = 'action-pill bull';
+                    globalActionPill.textContent = '雙市場截至資料日目標維持 · 實帳 +0.15x 超標另核';
+                    globalActionPill.className = 'action-pill neutral';
                 }
 
                 // F11: 定期自動重抓最新 EOD 訊號與轉倉雷達（保留既有輸入狀態）
