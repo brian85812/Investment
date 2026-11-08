@@ -207,7 +207,9 @@ class NotificationTests(unittest.TestCase):
         tw['last_trim'] = event('excess_trim', tw['date'], 3.04, 2.8)
         self.send()
         self.assertTrue(self.payloads[-1]['disable_notification'])
-        self.assertIn('上次目標變更(歷史參考): 尚無獨立紀錄', self.payloads[-1]['text'])
+        self.assertNotIn('（本次新訊號）', self.payloads[-1]['text'])
+        self.assertNotIn('模擬超標修剪提醒', self.payloads[-1]['text'])
+        self.assertNotIn('上次目標變更', self.payloads[-1]['text'])
 
     def test_old_api_classifies_trim_without_calling_it_target_change(self):
         tw = self.signals[1]
@@ -215,7 +217,8 @@ class NotificationTests(unittest.TestCase):
         tw['last_action'] = tw['last_trim'] = event('excess_trim', tw['date'], 3.04, 2.8)
         self.send()
         self.assertIn('模擬超標修剪提醒', self.payloads[-1]['text'])
-        self.assertIn('上次目標變更(歷史參考): 舊版未分列', self.payloads[-1]['text'])
+        self.assertNotIn('（本次新訊號）', self.payloads[-1]['text'])
+        self.assertIn('實帳 &gt;2.95x 才降回 <b>2.80x</b>', self.payloads[-1]['text'])
 
     def test_old_api_floating_point_noise_is_not_a_new_signal(self):
         tw = self.signals[1]
@@ -248,10 +251,11 @@ class NotificationTests(unittest.TestCase):
         self.send()
         text = self.payloads[-1]['text']
         self.assertIn('台股資料延遲：11/05，應11/06', text)
-        self.assertIn('歷史目標 <b>2.80x</b>（待更新，非本期調倉指示）', text)
+        self.assertIn('暫停調倉指示', text)
         self.assertNotIn('（本次新訊號）', text)
         self.assertNotIn('今日觸發模擬修剪提醒', text)
-        self.assertIn('2026-11-05', text)  # Historical records remain readable.
+        self.assertIn('台股 11/05', text)  # The affected market's data date stays explicit.
+        self.assertNotIn('實帳 &gt;2.95x', text)  # No stale-market trim instruction.
         state = json.loads(self.path.read_text(encoding='utf-8'))
         self.assertFalse(state['markets']['006208.TW'])
 
@@ -283,7 +287,7 @@ class NotificationTests(unittest.TestCase):
         self.assertIn('台股資料延遲：11/04，應11/05', self.payloads[-1]['text'])
         self.assertNotIn('（本次新訊號）', self.payloads[-1]['text'])
 
-    def test_structured_cooldown_and_grace_are_rendered_in_channels(self):
+    def test_compact_cooldown_is_shown_once_without_channel_repetition(self):
         self.signals[1]['strategy_state'] = {
             'schema_version': 1, 'label': '多頭階梯',
             'cooldown': {'active': True, 'remaining_days': 9, 'applies_to_current_stage': True},
@@ -292,8 +296,62 @@ class NotificationTests(unittest.TestCase):
         }
         self.send()
         text = self.payloads[-1]['text']
-        self.assertGreaterEqual(text.count('冷卻中，餘 9 個市場交易日'), 3)
-        self.assertIn('年線容忍 1/1 日', text)
+        self.assertEqual(text.count('冷卻餘 9 交易日'), 1)
+        self.assertNotIn('年線容忍', text)  # Detailed state remains on the dashboard.
+        self.assertNotIn('加碼 ', text)
+        self.assertNotIn('上次目標變更', text)
+
+    def test_no_new_action_is_short_and_keeps_real_account_condition(self):
+        self.send()
+        text = self.payloads[-1]['text']
+        self.assertIn('本次維持，無新增調倉', text)
+        self.assertIn('美股 11/04：維持 <b>0.80x</b>', text)
+        self.assertIn('台股 11/04：維持 <b>2.80x</b>', text)
+        self.assertIn('實帳超過目標+0.15x仍須核對修剪', text)
+        self.assertLessEqual(len(text), 180)
+        self.assertTrue(self.payloads[-1]['disable_notification'])
+
+    def test_new_signal_and_excess_trim_are_both_kept_in_one_market_line(self):
+        tw = self.tw_signal()
+        tw['last_excess_trim'] = event('excess_trim', tw['date'], 3.04, 2.8)
+        self.send()
+        text = self.payloads[-1]['text']
+        line = next(line for line in text.splitlines() if line.startswith('• 台股'))
+        self.assertIn('3.00x → 2.80x', line)
+        self.assertIn('模擬超標修剪提醒', line)
+        self.assertIn('實帳 &gt;2.95x 才降回 <b>2.80x</b>', line)
+        self.assertNotIn('無新增調倉', text)
+        self.assertFalse(self.payloads[-1]['disable_notification'])
+
+    def test_degraded_market_does_not_hide_other_markets_new_signal(self):
+        tw = self.tw_signal()
+        tw.update(expected_session='2026-11-05', is_stale=True)
+        us = self.signals[0]
+        us['target_yesterday'] = 2.23
+        us['last_signal_change'] = event('signal_change', us['date'], 2.23, .8)
+        self.send()
+        text = self.payloads[-1]['text']
+        self.assertIn('資料異常', text)
+        self.assertIn('目標 <b>2.23x → 0.80x</b>（本次新訊號）', text)
+        tw_line = next(line for line in text.splitlines() if line.startswith('• 台股'))
+        self.assertIn('暫停調倉指示', tw_line)
+        self.assertNotIn('（本次新訊號）', tw_line)
+        self.assertNotIn('無新增調倉', text)
+
+    def test_rollover_deadline_is_an_action_even_without_new_target(self):
+        self.rollover['tw']['days_left'] = 0
+        self.send()
+        text = self.payloads[-1]['text']
+        self.assertIn('需確認換約', text)
+        self.assertIn('台指期：今日結算，立即確認換約', text)
+        self.assertNotIn('本次維持，無新增調倉', text)
+        self.assertFalse(self.payloads[-1]['disable_notification'])
+
+    def test_rollover_watch_remains_quiet_and_uses_short_text(self):
+        self.rollover['tw']['days_left'] = 5
+        self.send()
+        self.assertIn('台指期：結算倒數 5 天，請確認換約', self.payloads[-1]['text'])
+        self.assertTrue(self.payloads[-1]['disable_notification'])
 
     def test_rerun_cache_keeps_new_delivery_for_the_next_run(self):
         cache = {}

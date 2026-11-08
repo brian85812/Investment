@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import argparse
+from html import escape
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -240,6 +241,56 @@ def _notify_snapshot(signals, rollover, state_path):
     return result
 
 
+def format_push_summary(signals, rollover, pending_events):
+    """只摘要本次尚未通知的動作；完整階段與歷史留在儀錶板。"""
+    fresh_pending = {s['ticker']: {} if _freshness_issues(s) else pending_events.get(s['ticker'], {})
+                     for s in signals}
+    has_action = any(events for events in fresh_pending.values())
+    degraded = any(_freshness_issues(s) for s in signals)
+    rollover_urgent = any((rollover.get(k) or {}).get('days_left', 99) <= 2 for k in ('tw', 'us'))
+    if degraded:
+        header = '⚠️ <b>資料異常，請核對以下事項</b>'
+    elif has_action:
+        header = '🔔 <b>本次有待核對動作</b>'
+    elif rollover_urgent:
+        header = '🎯 <b>需確認換約</b>'
+    else:
+        header = '✅ <b>本次維持，無新增調倉</b>'
+    lines = [header]
+    for signal in signals:
+        label = {'QQQ': '美股', '006208.TW': '台股'}.get(signal['ticker'], signal['ticker'])
+        prefix = f"• {escape(label)} {signal['date'][5:].replace('-', '/')}："
+        issues = _freshness_issues(signal)
+        if issues:
+            # 保留日期差異與來源失敗，過期事件也不消耗已送達紀錄。
+            lines.append(prefix + '暫停調倉指示；' + escape('；'.join(issues)))
+            continue
+        events = fresh_pending[signal['ticker']]
+        actions = []
+        if events.get('signal_change'):
+            event = events['signal_change']
+            actions.append(f"目標 <b>{event['from_lev']:.2f}x → {event['to_lev']:.2f}x</b>（本次新訊號）")
+        if events.get('excess_trim'):
+            actions.append(f"模擬超標修剪提醒：實帳 &gt;{signal['trim_trigger_lev']:.2f}x 才降回 <b>{signal['target_today']:.2f}x</b>")
+        if not actions:
+            actions.append(f"維持 <b>{signal['target_today']:.2f}x</b>")
+        state = signal.get('strategy_state') or {}
+        cd = state.get('cooldown') or {}
+        suffix = ''
+        if state.get('schema_version') == 1 and cd.get('active'):
+            direction = _cooldown_direction(cd).replace('階梯冷卻中', '冷卻')
+            suffix = f"（{direction}餘 {cd.get('remaining_days')} 交易日）"
+        lines.append(prefix + '；'.join(actions) + suffix)
+    for key, label in (('tw', '台指期'), ('us', '那指期')):
+        days = (rollover.get(key) or {}).get('days_left', 99)
+        if days <= 5:
+            reminder = '今日結算，立即確認換約' if days == 0 else (
+                '已到結算硬期限，立即確認換約' if days < 0 else f'結算倒數 {days} 天，請確認換約')
+            lines.append(f'🎯 {label}：{reminder}。')
+    lines.append('實帳超過目標+0.15x仍須核對修剪；詳情看儀錶板。')
+    return '\n'.join(lines), bool(has_action or degraded or rollover_urgent)
+
+
 def send_push_notification(signals, rollover, pending_events=None):
     """Send a report; delivered means API acknowledgement, not a read receipt.
 
@@ -266,89 +317,11 @@ def send_push_notification(signals, rollover, pending_events=None):
         # A direct caller cannot re-enable an old event on a degraded market card.
         pending_events = {s['ticker']: {} if _freshness_issues(s) else pending_events.get(s['ticker'], {})
                           for s in signals}
-    lev_changed = any(events.get('signal_change') for events in pending_events.values())
-    trim_today = any(events.get('excess_trim') for events in pending_events.values())
-    rollover_urgent = any(
-        rollover.get(k, {}).get('days_left', 99) <= 2 for k in ('tw', 'us')
-    )
-    freshness_issues = [issue for s in signals for issue in _freshness_issues(s)]
-    stale_warning = bool(freshness_issues)
-    urgent = lev_changed or trim_today or rollover_urgent or stale_warning
-
-    if stale_warning:
-        header = "⚠️ <b>【動態槓桿 · 資料新鮮度降級警告】</b>"
-    elif lev_changed:
-        header = "🚨 <b>【動態槓桿 · 調倉指令警報】</b>"
-    elif trim_today:
-        header = "⚠️ <b>【動態槓桿 · 模擬超標修剪提醒（請核對實帳槓桿）】</b>"
-    else:
-        header = "🟢 <b>【動態槓桿 EOD 戰情 · 本次維持，無新增調倉】</b>"
-
-    lines = [header, ""]
-    if freshness_issues:
-        lines += [f"⚠️ {' ｜ '.join(freshness_issues)}", '受影響市場僅供歷史參考，暫不提供本期調倉指示。', '']
-    for s in signals:
-        events = pending_events.get(s['ticker'], {})
-        signal_event = events.get('signal_change')
-        if _freshness_issues(s):
-            chg = f"截至 {s['date']} 的歷史目標 <b>{s['target_today']:.2f}x</b>（待更新，非本期調倉指示）"
-        elif signal_event:
-            chg = f"⚡ <b>{signal_event['from_lev']:.2f}x ➔ {signal_event['to_lev']:.2f}x</b>（本次新訊號）"
-        elif events.get('excess_trim'):
-            chg = f"⚠️ 維持 <b>{s['target_today']:.2f}x</b> (今日觸發模擬修剪提醒，實帳若 &gt;{s['trim_trigger_lev']:.2f}x 請砍回目標)"
-        else:
-            chg = f"維持 <b>{s['target_today']:.2f}x</b>（無新增調倉）"
-
-        if not s['in_trend']:
-            if s.get('pre_bull_active', False):
-                bear_v = s.get('sma_bear_val') or s['sma_slow_val']
-                add_str = f"<code>季線總攻中(守60MA&gt;={bear_v:.2f}/攻220MA&gt;{s['sma_slow_val']:.2f})</code>"
-            else:
-                add_str = f"<code>站上年線&gt;{s['sma_slow_val']:.2f}</code>"
-            sub_str = "<code>已處底倉</code>"
-        else:
-            if s.get('ext_guard_active', False):
-                cap_v = s.get('ext_cap') or 1.8
-                add_str = f"<code>過熱封頂{cap_v:.1f}x</code>"
-            elif s['step_idx'] >= s['max_steps']:
-                add_str = "<code>已滿載鎖定</code>"
-            else:
-                add_str = f"<code>&gt;{s['high_bw']:.2f}</code>"
-            sub_str = "<code>已處底倉</code>" if s['step_idx'] == 0 else f"<code>&lt;{s['low_bw']:.2f}</code>"
-        add_str += f"（{_channel_state_text(s, 'step_up')}）"
-        sub_str += f"（{_channel_state_text(s, 'step_down')}）"
-
-        history = _market_events(s)
-        la = history.get('signal_change')
-        lt = history.get('excess_trim')
-        la_str = (
-            f"{la['date']} "
-            f"<code>{la['from_lev']:.2f}x ➔ {la['to_lev']:.2f}x</code> [{la['type']}]"
-            if la else ("尚無獨立紀錄" if 'last_signal_change' in s else "舊版未分列")
-        )
-        lt_str = (
-            f"{lt['date']} "
-            f"<code>{lt['from_lev']:.2f}x ➔ {lt['to_lev']:.2f}x</code> [{lt['type']}]"
-            if lt else ("尚無獨立紀錄" if 'last_excess_trim' in s else "舊版未分列")
-        )
-        hist_line = (f"  🕒 上次目標變更(歷史參考): {la_str}"
-                     f"\n  ✂️ 上次超標修剪(模擬參考): {lt_str}")
-
-        lines.append(
-            f"• <b>{s['name']}</b> ({s['date']})｜收盤 <code>{s['close']:.2f}</code>\n"
-            f"  目標: {chg} (階梯 {s['step_idx']}/{s['max_steps']} · 修剪線 &gt;{s['trim_trigger_lev']:.2f}x)\n"
-            f"  加碼 {add_str} ｜ 減碼 {sub_str} ｜ 220MA <code>{s['sma_slow_val']:.2f}</code>\n"
-            f"  截至資料日狀態：{_strategy_state_text(s)}\n"
-            f"{hist_line}"
-        )
-    for k in ('tw', 'us'):
-        ro = rollover.get(k, {})
-        if ro and ro.get('days_left', 99) <= 5:
-            lines.append(f"\n🎯 <b>轉倉日曆提醒</b>：{ro['market']} 結算倒數 <b>{ro['days_left']} 天</b> ({ro['badge']})")
+    text, urgent = format_push_summary(signals, rollover, pending_events)
 
     payload = json.dumps({
         "chat_id": chat_id,
-        "text": "\n".join(lines),
+        "text": text,
         "parse_mode": "HTML",
         "disable_notification": (not urgent)
     }).encode("utf-8")
