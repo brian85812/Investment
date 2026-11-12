@@ -1,0 +1,38 @@
+name: Verify Futu read-only fallback
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: futu-read-only-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify credentials, real bars and in-memory gap repair
+        env:
+          FUTU_API_KEY: ${{ secrets.FUTU_API_KEY }}
+          FUTU_PRIVATE_KEY_PEM: ${{ secrets.FUTU_PRIVATE_KEY_PEM }}
+          FUTU_PRIVATE_KEY_PASSWORD: ${{ secrets.FUTU_PRIVATE_KEY_PASSWORD }}
+        run: python -B -X utf8 tools/verify_futu_live.py --report "$RUNNER_TEMP/futu-validation.json"
+      - name: Upload sanitized validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: futu-validation-report
+          path: ${{ runner.temp }}/futu-validation.json
+          if-no-files-found: warn
+          retention-days: 7
