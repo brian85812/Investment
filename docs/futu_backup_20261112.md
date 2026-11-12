@@ -4,7 +4,7 @@
 
 已接入正式 `fetch_robust_market_data`。Yahoo 完整收盤落後時才嘗試富途，只補 QQQ 最後完整日之後最多 5 個交易日，不覆寫有效舊列或以短歷史重設十年狀態。台股沿用 Yahoo＋TWSE，策略參數、結算成本、冷卻、資金池及研究凍結行情不變。
 
-尚未完成富途帳戶授權及真實行情口徑驗收。無憑證時不呼叫富途；憑證不足／HTTP 401／權限失敗時保留 Yahoo 舊資料及 stale 警示，API metadata 的 `secondary_source.status` 提供不含秘密的診斷結果。**程式部署不等於富途已啟用，也不代表缺失收盤已補齊。**
+已於2026-11-12完成富途行情授權及真實驗收，見文末紀錄。無憑證時不呼叫富途；憑證不足／HTTP 401／權限失敗時保留 Yahoo 舊資料及 stale 警示，API metadata 的 `secondary_source.status` 提供不含秘密的診斷結果。正常行情仍優先沿用Yahoo，富途僅在缺日及驗證通過時補價。
 
 Yahoo 若完全無法取得至少225列歷史，仍維持原先拒絕輸出；本次沒有引入十年歷史快取或完整替代資料庫。需要另案處理長時間全站斷線。
 
@@ -42,7 +42,7 @@ Yahoo 若完全無法取得至少225列歷史，仍維持原先拒絕輸出；�
    | `FUTU_PRIVATE_KEY_PEM` | 加密的私鑰 PEM 檔案內容 |
    | `FUTU_PRIVATE_KEY_PASSWORD` | 私鑰加密密碼 |
 
-   金鑰僅在建置步驟由 Secrets 注入，不進入靜態網站、快取、通知或 Git。不要把私鑰／密碼貼進對話。尚未替使用者建立 AppKey 或儲存 Secrets。
+   金鑰僅在建置步驟由 Secrets 注入，不進入靜態網站、快取、通知或 Git。不要把私鑰／密碼貼進對話。AppKey 與三個 Secrets 已由使用者自行建立；助理只核對名稱存在並於GitHub內驗收。
 
 4. 本機測試時可設 `FUTU_API_KEY`、`FUTU_PRIVATE_KEY_FILE`（指向加密私鑰）及 `FUTU_PRIVATE_KEY_PASSWORD`，以私密輸入方式注入；PEM 與 FILE 只選一種，不把密碼寫進 PowerShell 歷史。權限測試：
 
@@ -65,3 +65,18 @@ Yahoo 若完全無法取得至少225列歷史，仍維持原先拒絕輸出；�
 - [授權與簽章](https://open.futunn.com/api/overview/getting-started)
 - [歷史日K](https://open.futunn.com/api/quote/basic-data/history-kline)
 - [行情權限](https://open.futunn.com/api/overview/api-authority)
+
+## 真實行情驗收完成（2026-11-12）
+
+[唯讀驗收 run 43154778195](https://github.com/brian85812/Investment/actions/runs/43154778195) 成功，程式提交 `4ed2ec016daa1cca26c3ab17139411d62c149db2`。獨立工作流 `Verify Futu read-only fallback` 只由手動啟動，不部署網站、不發送Telegram；私鑰只在GitHub執行環境解密，回傳報表不含憑證。
+
+- AppKey簽章及授權成功；未復權與前復權請求均HTTP 200、ret_code=0，各取得346個真實交易日。
+- 富途最後資料日2026-11-11，收盤690.38。
+- 在記憶體移除Yahoo最後一日，再把真實富途回覆交給正式補價流程，成功補回11/11。
+- 345個重疊交易日之還原OHLC最大差異0.0058129163美元，通過既定1美分＋1e-6相對誤差閘門；未放寬條件。
+- 補回的保留日與原Yahoo完整列之四價最大差異0.0017024414美元。
+- 正式網站QQQ仍使用正常Yahoo資料，secondary_source.status=not_needed，不能宣稱正式網站當時已改用富途。
+
+原始去憑證報表為該run的 `futu-validation-report` artifact，本地另存 `Stock/research/futu_live_20261112/live_report_43154778195.json`。正式更新流程run 43154674313亦成功（含73個Python回歸及既有前端檢查）。
+
+目前這把AppKey於2026-12-12到期，屆時須更新授權；程式未實作自動續期。這次驗收不保證未來所有公司行動或供應商修訂均可拼接，後續仍逐次執行相同拒絕閘門。
