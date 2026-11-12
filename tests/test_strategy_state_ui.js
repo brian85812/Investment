@@ -169,6 +169,34 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.match(text(boundary, 1, '.cooldown-badge'), /冷卻已結束/);
     assert.doesNotMatch(text(boundary, 1, '.low-bw-val'), /冷卻中/);
     cases.push('cooldown_boundary_uses_backend_state');
+
+    const annual = await render([market('QQQ', {in_trend: false, step_idx: 0, close: 690.38,
+        target_today: .8, target_yesterday: .8, sma_fast_val: 669.53, sma_slow_val: 675.04,
+        sma_bear_val: 717.78, fast_ma_len: 5, slow_ma_len: 220, bo_up_len: 8,
+        strategy_state: state({stage: 'defense', label: '常態防禦底倉', d1: {enabled: true, blocked: false},
+            priority_defense: {active: true, reasons: ['fast_below_annual'], bypasses_step_cooldown: true}})}), market('006208.TW')]);
+    assert.match(text(annual, 0, '.high-bw-val'), /收盤 ≥ 675\.04 且 5MA ≥ 220MA/);
+    assert.match(text(annual, 0, '.high-bw-val'), /5MA仍低於220MA/);
+    assert.equal(text(annual, 0, '.high-bw-label'), '🧭 防禦轉多頭／E3b條件');
+    assert.equal(text(annual, 1, '.high-bw-label'), '📈 階梯升檔門檻 (Close)');
+    assert.match(text(annual, 0, '.strategy-explanation'), /進入多頭後.*突破 8 日通道.*D1/);
+    assert.match(text(annual, 0, '.delta-badge'), /維持 0\.80x/);
+    cases.push('price_above_annual_still_requires_fast_ma_and_separate_step_filters');
+
+    const roundedAnnual = await render([market('QQQ', {in_trend: false, step_idx: 0, sma_fast_val: 100,
+        sma_slow_val: 100, sma_bear_val: 110, strategy_state: state({stage: 'defense',
+            priority_defense: {active: true, reasons: ['fast_below_annual']}})}), market('006208.TW')]);
+    assert.match(text(roundedAnnual, 0, '.high-bw-val'), /5MA仍低於220MA/);
+    cases.push('annual_fast_block_uses_backend_reason_when_rounded_values_are_equal');
+
+    const e3bActive = await render([market('QQQ', {in_trend: false, pre_bull_active: true,
+        strategy_state: state({stage: 'e3b', label: 'E3b季線總攻'})}), market('006208.TW')]);
+    assert.match(text(e3bActive, 0, '.high-bw-val'), /收盤與快線守季線.*重返多頭須.*5MA ≥ 220MA/);
+    cases.push('e3b_maintenance_and_bull_reentry_show_distinct_complete_requirements');
+
+    const e3bEntry = await render([market('QQQ', {in_trend: false}), market('006208.TW')]);
+    assert.match(text(e3bEntry, 0, '.high-bw-val'), /E3b 進場須收盤 > 101\.00.*重返多頭須/);
+    cases.push('e3b_strict_breakout_and_annual_inclusive_reentry_are_explicit');
     console.log(JSON.stringify({passed: true, cases, samples: {
         stale_top: stale.global.textContent,
         stale_delta: text(stale, 1, '.delta-badge'),

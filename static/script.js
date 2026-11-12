@@ -84,6 +84,17 @@ document.addEventListener('DOMContentLoaded', () => {
         return [...new Set(reasons)].join('；');
     }
 
+    function bullReentryText(market, state) {
+        const fastDays = market.fast_ma_len || (market.ticker === 'QQQ' ? 5 : 8);
+        const slowDays = market.slow_ma_len || 220;
+        let value = `重返多頭須收盤 ≥ ${market.sma_slow_val.toFixed(2)} 且 ${fastDays}MA ≥ ${slowDays}MA（目前快線 ${market.sma_fast_val.toFixed(2)}）`;
+        // 原始精度的阻擋原因由後端提供，不用四捨五入的顯示值重新判斷。
+        const reasons = state && state.priority_defense ? state.priority_defense.reasons || [] : [];
+        if (reasons.includes('fast_below_annual')) value += `；${fastDays}MA仍低於${slowDays}MA`;
+        if (reasons.includes('annual_grace_exhausted')) value += '；收盤仍低於年線';
+        return value;
+    }
+
     function strategySummary(market, state, freshness, changed, trimmed) {
         const parts = [`截至 ${market.date} 資料日：${state ? state.label : (market.in_trend ? '多頭狀態' : '防禦狀態')}`];
         if (state) {
@@ -97,6 +108,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (state.priority_defense && state.priority_defense.bypasses_step_cooldown) parts.push('年線／深熊優先防禦不受階梯冷卻限制');
         } else {
             parts.push('舊版資料未提供獨立階段與冷卻計數');
+        }
+        if (!market.in_trend) {
+            parts.push(bullReentryText(market, state));
+            const upDays = market.bo_up_len || (market.ticker === 'QQQ' ? 8 : 15);
+            parts.push(`進入多頭後，階梯升檔仍須突破 ${upDays} 日通道、冷卻完成${state && state.d1 && state.d1.enabled ? '及通過 D1 濾網' : ''}`);
         }
         if (freshness.blocked) parts.push('資料待更新；舊訊號僅供歷史參考，暫不提供本期調倉指示');
         else if (changed) parts.push('資料日有新目標變更；實帳是否調整依部位試算');
@@ -280,18 +296,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     // 2x2 技術防線矩陣
                     const highBwElem = clone.querySelector('.high-bw-val');
+                    const highBwLabel = clone.querySelector('.high-bw-label');
+                    if (highBwLabel) highBwLabel.textContent = market.in_trend
+                        ? '📈 階梯升檔門檻 (Close)' : '🧭 防禦轉多頭／E3b條件';
                     const isD1Frozen = state && state.d1 ? state.d1.blocked
                         : (market.ticker === 'QQQ') && market.in_trend && market.sma_bear_val && (market.sma_fast_val < market.sma_bear_val);
                     if (!market.in_trend) {
+                        const reentry = bullReentryText(market, state);
                         if (market.pre_bull_active) {
                             const bearGuardVal = (market.sma_bear_val || market.sma_slow_val).toFixed(1);
-                            highBwElem.textContent = `⚡ 季線總攻中 (守季線 ≥${bearGuardVal} / 攻年線 >${market.sma_slow_val.toFixed(1)})`;
+                            highBwElem.textContent = `⚡ 季線總攻中（收盤與快線守季線 ≥${bearGuardVal}）；${reentry}`;
                             highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                         } else if (market.sma_bear_val && market.close >= market.sma_bear_val && market.sma_fast_val >= market.sma_bear_val) {
-                            highBwElem.textContent = `⚡ E3b 總攻 > ${market.high_bw.toFixed(2)}`;
+                            highBwElem.textContent = `⚡ E3b 進場須收盤 > ${market.high_bw.toFixed(2)}；${reentry}`;
                             highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                         } else {
-                            highBwElem.textContent = `站上年線 > ${market.sma_slow_val.toFixed(2)}`;
+                            highBwElem.textContent = reentry;
                             highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
                         }
                     } else if (market.ext_guard_active) {
