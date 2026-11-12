@@ -5,3 +5,4 @@ pandas==3.0.6
 numpy==2.5.4
 certifi==2026.7.22
 gunicorn==23.0.0
+cryptography==50.0.2

@@ -81,6 +81,10 @@ jobs:
             tg-notify-dedup-
 
       - name: 執行量化運算並產出靜態網站構件 (F03 雙市場完整性門檻 + F11 部署前不提前推播)
+        env:
+          FUTU_API_KEY: ${{ secrets.FUTU_API_KEY }}
+          FUTU_PRIVATE_KEY_PEM: ${{ secrets.FUTU_PRIVATE_KEY_PEM }}
+          FUTU_PRIVATE_KEY_PASSWORD: ${{ secrets.FUTU_PRIVATE_KEY_PASSWORD }}
         run: |
           python build_static.py --build-only
 

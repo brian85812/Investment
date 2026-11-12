@@ -510,6 +510,18 @@ def fetch_robust_market_data(ticker):
     df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
     df = df[~df.index.duplicated(keep='last')].sort_index()
 
+    # 獨立美股來源：未授權或還原價驗證失敗時維持舊資料與 stale 警示。
+    secondary_source = None
+    if ticker == 'QQQ':
+        from futu_source import repair_qqq_history
+        df, secondary_source = repair_qqq_history(
+            df, expected_session, lambda day: not _is_us_holiday(day), ssl_context=ssl_ctx)
+        if secondary_source['status'] == 'repaired':
+            source_layer += '+futu'
+            print(f"✅ [獨立備援] 富途已驗證補齊 {ticker}：{','.join(secondary_source['patched_dates'])}")
+        elif secondary_source['status'] != 'not_needed':
+            print(f"⚠️ [獨立備援] {ticker} 未補價：{secondary_source['status']}")
+
     # 第 3 層：台股向 TWSE 自動對帳補齊與去假 K
     df = auto_patch_twse(ticker, df)
 
@@ -584,6 +596,8 @@ def fetch_robust_market_data(ticker):
     df.attrs['is_stale'] = bool(is_stale)
     df.attrs['data_status'] = 'stale' if is_stale else 'ok'
     df.attrs['source_layer'] = source_layer
+    if secondary_source is not None:
+        df.attrs['secondary_source'] = secondary_source
     return df
 
 def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None, add_above_bear=False, pre_bull_boost=None, breakout_up=None, breakout_dn=None):
@@ -1015,6 +1029,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'stale_days': stale_days,
         'data_status': 'stale' if is_stale else 'ok',
         'source_layer': df_attrs.get('source_layer', 'yfinance'),
+        'secondary_source': df_attrs.get('secondary_source'),
         'close': cur_p,
         'in_trend': in_trend,
         'step_idx': step_idx,
