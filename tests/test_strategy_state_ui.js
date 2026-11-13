@@ -78,6 +78,30 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.match(inferred.global.textContent, /台股資料延遲：11\/05，應11\/06/);
     cases.push('expected_session_date_detects_stale_even_if_flag_inconsistent');
 
+    const unconfiguredBackup = await render([market('QQQ', {date: '2026-11-05',
+        secondary_source: {provider: 'futu', status: 'authorization_required'}}), market('006208.TW')]);
+    assert.match(unconfiguredBackup.global.textContent, /美股資料延遲.*此網站尚未設定富途備援憑證/);
+    assert.match(text(unconfiguredBackup, 0, '.stale-badge'), /此網站尚未設定富途備援憑證/);
+    assert.match(text(unconfiguredBackup, 0, '.calc-freshness-note'), /尚未設定富途.*暫停確定調倉試算/);
+    assert.match(text(unconfiguredBackup, 0, '.delta-badge'), /待更新/);
+    cases.push('stale_futu_missing_runtime_credentials_are_explicit_and_orders_remain_blocked');
+
+    for (const [status, expected] of [['authorization_failed', /授權被拒絕/],
+        ['adjusted_price_basis_mismatch', /還原價口徑不符.*拒絕補價/],
+        ['provider_unavailable', /備援連線失敗/]]) {
+        const problem = await render([market('QQQ', {date: '2026-11-05',
+            secondary_source: {provider: 'futu', status}}), market('006208.TW')]);
+        assert.match(text(problem, 0, '.stale-badge'), expected);
+        assert.match(text(problem, 0, '.delta-badge'), /待更新/);
+    }
+    const unknownBackup = await render([market('QQQ', {date: '2026-11-05',
+        secondary_source: {provider: 'futu', status: '<unexpected_private_provider_message>'}}), market('006208.TW')]);
+    assert.doesNotMatch(unknownBackup.global.textContent, /unexpected_private_provider_message/);
+    const repairedBackup = await render([market('QQQ', {
+        secondary_source: {provider: 'futu', status: 'repaired'}}), market('006208.TW')]);
+    assert.doesNotMatch(repairedBackup.global.textContent, /資料延遲|備援憑證|拒絕補價|連線失敗/);
+    cases.push('futu_failure_causes_are_distinct_and_unknown_details_are_not_echoed');
+
     const fallback = await render([market('QQQ'), market('006208.TW', {fallback_used: true, target_yesterday: 3})]);
     assert.match(fallback.global.textContent, /台股來源失敗，使用備援資料/);
     assert.doesNotMatch(fallback.global.textContent, /資料延遲|資料缺失/);

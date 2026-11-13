@@ -6,6 +6,28 @@
 
 已於2026-11-12完成富途行情授權及真實驗收，見文末紀錄。無憑證時不呼叫富途；憑證不足／HTTP 401／權限失敗時保留 Yahoo 舊資料及 stale 警示，API metadata 的 `secondary_source.status` 提供不含秘密的診斷結果。正常行情仍優先沿用Yahoo，富途僅在缺日及驗證通過時補價。
 
+**部署範圍更正（2026-11-13）：先前授權驗收只涵蓋 GitHub Actions，不代表 Render 或本機已設定。** 各環境必須分別注入憑證，不能僅以程式已合併或 GitHub 驗收成功宣稱實際網站備援可用。
+
+當日讀取使用者實際網站 `https://investment-c52f.onrender.com/api/data`：QQQ 資料為 11/11、應有日 11/12、`secondary_source.status=authorization_required`；`/health` 為 503。Yahoo 11/12 缺少 Close，而 GitHub 專用唯讀驗收 run 43347220093 已取得富途同日 Close 688.17 並以原驗證門檻成功補價。因此 Render 缺少憑證是此網站沒有啟用第二供應商的已確認原因，尚須完成以下設定及線上複驗。
+
+## Render 使用者設定步驟
+
+1. 登入 [Render Dashboard](https://dashboard.render.com/)，選取網址為 `investment-c52f.onrender.com` 的 Web Service；不要選 GitHub Pages 或其他同名服務。
+2. 左側點 **Environment**，在 **Environment Variables** 點 **Edit**／**+ Add Environment Variable**，新增三列。Key 必須完全一致，Value 不加外層引號：
+
+   | Key | Value |
+   |---|---|
+   | `FUTU_API_KEY` | 富途 Console 中 SchemeC 的完整 AppKey ID；不是名稱 SchemeC |
+   | `FUTU_PRIVATE_KEY_PEM` | 原本 `futu_private_key.pem` 完整內容，含 BEGIN/END 與實際換行 |
+   | `FUTU_PRIVATE_KEY_PASSWORD` | 原本產生金鑰時輸入的私鑰加密密碼；不是富途或 Render 登入密碼 |
+
+3. 私鑰檔位於 `C:\Users\brian\AppData\Local\DynamicLeverage\futu\futu_private_key.pem`。用記事本開啟，Ctrl+A、Ctrl+C，貼到 Render 對應 Value。加密私鑰首尾為 `-----BEGIN ENCRYPTED PRIVATE KEY-----`／`-----END ENCRYPTED PRIVATE KEY-----`。不要改用 public key，不要重跑產生金鑰程式；GitHub 已儲存的 Secret 無法讀回。
+4. 這個方案只用 PEM；不要同時設定 `FUTU_PRIVATE_KEY_FILE`。保留其他既有環境變數，不要整批替換或把密鑰提交 Git／貼入對話。
+5. 選 **Save, rebuild, and deploy**，等待服務狀態 **Live**。單純 Save only 不會讓現有程序取得新設定。
+6. 由助理讀取實際 Render `/api/data` 複驗：若 Yahoo 仍缺日，應見 QQQ 日期等於應有日、`source_layer` 含 `+futu`、`secondary_source.status=repaired`。並核對 `/health`、價格與策略狀態；若 Yahoo 已恢復且顯示 `not_needed`，只能證明主來源已更新，仍須對該環境另做備援驗收，不能據此宣稱富途通過。
+
+步驟依 [Render 官方環境變數文件](https://render.com/docs/configure-environment-variables)。網站延遲時會顯示固定的備援診斷，例如「此網站尚未設定富途備援憑證」，區分未設定、授權失敗、連線失敗與價基驗證拒絕；不輸出憑證或供應商原始錯誤。
+
 Yahoo 若完全無法取得至少225列歷史，仍維持原先拒絕輸出；本次沒有引入十年歷史快取或完整替代資料庫。需要另案處理長時間全站斷線。
 
 ## 資料驗證

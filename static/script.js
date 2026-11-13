@@ -44,6 +44,28 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (stale && !fallback) issues.push(`${marketLabel(market.ticker)}資料新鮮度未確認（資料${shortDate(market.date)}，應有日期待核）`);
         if (fallback) issues.push(`${marketLabel(market.ticker)}來源失敗，使用備援資料（截至${shortDate(market.date)}）`);
         if (other) issues.push(`${marketLabel(market.ticker)}資料來源狀態：${status}`);
+        // 憑證屬於各自的伺服器；GitHub Secrets 不代表 Render 也已設定。
+        // 只呈現固定診斷文案，不把供應商回覆或未知狀態直接插入畫面。
+        if ((stale || fallback || other) && market.ticker === 'QQQ' && market.secondary_source
+            && market.secondary_source.provider === 'futu') {
+            const backupStatus = market.secondary_source.status;
+            const backupIssues = {
+                authorization_required: '此網站尚未設定富途備援憑證',
+                credential_configuration_invalid: '此網站的富途備援憑證設定不完整或衝突',
+                private_key_invalid: '富途備援私鑰或解密密碼無法使用',
+                authorization_failed: '富途備援授權被拒絕，請核對權限與有效期',
+                provider_unavailable: '富途備援連線失敗',
+                provider_http_error: '富途備援服務回應異常',
+                provider_rejected: '富途備援請求未獲接受',
+                rate_limited: '富途備援暫時限流',
+                adjusted_price_basis_mismatch: '富途與 Yahoo 還原價口徑不符，已拒絕補價',
+                raw_price_mismatch: '富途與 Yahoo 原始收盤價不符，已拒絕補價',
+                missing_completed_session: '富途也尚未提供應有交易日的完整收盤資料'
+            };
+            if (Object.prototype.hasOwnProperty.call(backupIssues, backupStatus)) {
+                issues.push(`${marketLabel(market.ticker)}：${backupIssues[backupStatus]}`);
+            }
+        }
         return {stale, fallback, blocked: Boolean(stale || fallback || other), issues};
     }
 
