@@ -117,6 +117,40 @@ document.addEventListener('DOMContentLoaded', () => {
         return value;
     }
 
+    function renderEntryChecks(card, market, state, freshness) {
+        const fastDays = market.fast_ma_len || (market.ticker === 'QQQ' ? 5 : 8);
+        const slowDays = market.slow_ma_len || 220;
+        const upDays = market.bo_up_len || (market.ticker === 'QQQ' ? 8 : 15);
+        const d1Enabled = state && state.d1 && typeof state.d1.enabled === 'boolean'
+            ? state.d1.enabled : market.ticker === 'QQQ';
+        const inGrace = state && state.grace && state.grace.active;
+        const trendStatus = market.in_trend ? (inGrace ? '維持中（年線容忍）' : '已恢復') : '尚未恢復';
+        card.querySelector('.entry-trend-check').textContent = `① 多頭狀態：${trendStatus}。恢復須收盤 ≥ ${slowDays}MA，且 ${fastDays}MA ≥ ${slowDays}MA；恢復多頭不代表直接加碼。`;
+        const breakout = state && state.triggers && typeof state.triggers.breakout_up === 'boolean'
+            ? (state.triggers.breakout_up ? '已突破' : '未突破') : '判定未提供';
+        card.querySelector('.entry-breakout-check').textContent = `② 收盤突破：${breakout}。收盤 ${market.close.toFixed(2)} 須 > 前 ${upDays} 日最高收盤 ${market.high_bw.toFixed(2)}。`;
+        let d1Text = '③ D1 濾網：本市場不啟用。';
+        if (d1Enabled) {
+            // 防禦階段的 d1.blocked=false 表示未啟用升檔，不能顯示為已通過。
+            const status = !market.in_trend ? '恢復多頭後仍須核對'
+                : state && state.d1 ? (state.d1.blocked ? '未通過' : '已通過') : '判定未提供';
+            const bear = Number.isFinite(market.sma_bear_val) ? market.sma_bear_val.toFixed(2) : '待更新';
+            d1Text = `③ D1 濾網：${status}。${fastDays}MA ${market.sma_fast_val.toFixed(2)} 須 ≥ 60MA ${bear}。`;
+        }
+        card.querySelector('.entry-d1-check').textContent = d1Text;
+        const cd = state && state.cooldown;
+        let cooldown = '判定未提供';
+        if (cd && Number.isFinite(cd.remaining_days)) {
+            cooldown = cd.remaining_days > 0 ? `尚餘 ${cd.remaining_days} 個市場交易日` : '已完成';
+            if (cd.step_event_on_data_bar) cooldown = `本期階梯動作已生效；新冷卻${cooldown}`;
+        }
+        card.querySelector('.entry-cooldown-check').textContent = `④ 階梯冷卻：${cooldown}。年線／深熊優先防禦不受階梯冷卻限制。`;
+        card.querySelector('.entry-check-note').textContent = freshness.blocked
+            ? '資料待更新，以上僅供截至資料日參考；暫不提供本期調倉指示。'
+            : market.step_idx >= market.max_steps ? '已在最高階梯，不再升檔；目標仍依封頂與防禦規則計算。'
+                : '階梯升檔須同時滿足以上必要條件，目標仍受封頂規則限制；條件可在同一收盤日一起成立。';
+    }
+
     function strategySummary(market, state, freshness, changed, trimmed) {
         const parts = [`截至 ${market.date} 資料日：${state ? state.label : (market.in_trend ? '多頭狀態' : '防禦狀態')}`];
         if (state) {
@@ -133,6 +167,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (!market.in_trend) {
             parts.push(bullReentryText(market, state));
+            parts.push('恢復多頭不代表目標立即增加');
             const upDays = market.bo_up_len || (market.ticker === 'QQQ' ? 8 : 15);
             parts.push(`進入多頭後，階梯升檔仍須突破 ${upDays} 日通道、冷卻完成${state && state.d1 && state.d1.enabled ? '及通過 D1 濾網' : ''}`);
         }
@@ -343,7 +378,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         highBwElem.textContent = `🔒 已達 ${market.max_leverage.toFixed(1)}x 滿載上限`;
                         highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                     } else if (isD1Frozen) {
-                        highBwElem.textContent = `🛡️ D1 凍結 (待 5MA ≥ ${market.sma_bear_val.toFixed(1)})`;
+                        highBwElem.textContent = `收盤仍須 > ${market.high_bw.toFixed(2)}；🛡️ D1 凍結 (待 5MA ≥ 60MA ${market.sma_bear_val.toFixed(2)})`;
                         highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
                     } else {
                         highBwElem.textContent = `> ${market.high_bw.toFixed(2)}`;
@@ -384,6 +419,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         lastTrimElem.textContent = fmtEvent(events.excess, events.legacyExcess);
                     }
 
+                    renderEntryChecks(clone, market, state, freshness);
                     clone.querySelector('.strategy-explanation').textContent = strategySummary(market, state, freshness, targetChangedToday, isTrimToday);
 
                     // 實戰部位與 DCA 試算器 (F04/F05/F11/F20: 100% 對齊 engine.run Step 4 單一淨指令；缺欄位時嚴禁反推實質槓桿或確定淨單)

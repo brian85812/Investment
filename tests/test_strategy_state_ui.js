@@ -221,6 +221,31 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     const e3bEntry = await render([market('QQQ', {in_trend: false}), market('006208.TW')]);
     assert.match(text(e3bEntry, 0, '.high-bw-val'), /E3b 進場須收盤 > 101\.00.*重返多頭須/);
     cases.push('e3b_strict_breakout_and_annual_inclusive_reentry_are_explicit');
+
+    assert.match(text(annual, 0, '.entry-trend-check'), /尚未恢復.*恢復多頭不代表直接加碼/);
+    assert.match(text(annual, 0, '.entry-d1-check'), /恢復多頭後仍須核對.*5MA 669\.53.*60MA 717\.78/);
+    assert.doesNotMatch(text(annual, 0, '.entry-d1-check'), /已通過/);
+    assert.match(text(annual, 0, '.entry-breakout-check'), /前 8 日最高收盤/);
+    cases.push('defense_shows_future_step_filters_without_claiming_inactive_d1_has_passed');
+
+    const reentered = await render([market('QQQ', {step_idx: 0, max_steps: 3, close: 688.17,
+        sma_fast_val: 677.75, sma_slow_val: 675.36, sma_bear_val: 717.33, high_bw: 691.95,
+        bo_up_len: 8, target_today: .8, target_yesterday: .8,
+        strategy_state: state({stage: 'd1_frozen', label: 'D1季線濾網限制升檔', d1: {enabled: true, blocked: true},
+            triggers: {breakout_up: false}})}), market('006208.TW')]);
+    assert.match(text(reentered, 0, '.entry-trend-check'), /已恢復.*不代表直接加碼/);
+    assert.match(text(reentered, 0, '.entry-breakout-check'), /未突破.*688\.17.*691\.95/);
+    assert.match(text(reentered, 0, '.entry-d1-check'), /未通過.*677\.75.*717\.33/);
+    assert.match(text(reentered, 0, '.entry-cooldown-check'), /已完成/);
+    assert.match(text(reentered, 0, '.high-bw-val'), /691\.95.*D1 凍結.*60MA 717\.33/);
+    assert.match(text(reentered, 1, '.entry-d1-check'), /本市場不啟用/);
+    assert.match(text(stale, 1, '.entry-check-note'), /資料待更新.*暫不提供本期調倉指示/);
+    cases.push('reentry_without_breakout_or_d1_keeps_all_simultaneous_requirements_visible');
+
+    assert.match(text(d1, 0, '.entry-d1-check'), /未通過/);
+    assert.match(text(d1, 0, '.entry-cooldown-check'), /餘 9 個市場交易日/);
+    assert.match(text(old, 1, '.entry-cooldown-check'), /判定未提供/);
+    cases.push('entry_checklist_preserves_raw_backend_decisions_and_unknown_legacy_state');
     console.log(JSON.stringify({passed: true, cases, samples: {
         stale_top: stale.global.textContent,
         stale_delta: text(stale, 1, '.delta-badge'),

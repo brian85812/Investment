@@ -122,6 +122,10 @@ body {
 .stage-badge { background: var(--accent-bg); color: #93c5fd; }
 .cooldown-badge, .grace-badge, .stale-badge, .calc-freshness-note { background: var(--warn-bg); color: var(--warn); }
 .calc-freshness-note { padding: 8px 10px; border-radius: 6px; font-size: .8rem; margin-bottom: 10px; }
+.entry-checklist { padding: 12px 14px; margin-bottom: 14px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-elevated); font-size: .78rem; overflow-wrap: anywhere; }
+.entry-check-title { color: var(--text-main); font-weight: 700; margin-bottom: 8px; }
+.entry-checklist p { color: var(--text-muted); margin-top: 6px; }
+.entry-checklist .entry-check-note { border-top: 1px solid var(--border-subtle); padding-top: 8px; color: var(--text-main); }
 
 .signal-delta-box { text-align: right; }
 .delta-label { display: block; font-size: 0.7rem; color: var(--text-dim); margin-bottom: 3px; }
