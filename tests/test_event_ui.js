@@ -8,7 +8,7 @@ const source = fs.readFileSync(scriptPath, 'utf8');
 
 class Element {
     constructor() {
-        this.parts = new Map(); this.children = []; this.listeners = {};
+        this.parts = new Map(); this.children = []; this.listeners = {}; this.dataset = {};
         this.textContent = ''; this.innerHTML = ''; this.value = ''; this.className = ''; this.open = false;
         const classes = new Set(['hidden']);
         this.classList = {add: (...xs) => xs.forEach(x => classes.add(x)), remove: (...xs) => xs.forEach(x => classes.delete(x)), contains: x => classes.has(x)};
@@ -64,9 +64,9 @@ const text = (r, i, selector) => r.cards[i].querySelector(selector).textContent;
     const split = await render([market('QQQ'), market('006208.TW', {
         last_signal_change: signal, last_excess_trim: trim, last_action: trim, last_trim: trim
     })]);
-    assert.match(text(split, 1, '.last-action-val'), /2026-10-28/);
+    assert.match(text(split, 1, '.last-action-val'), /10\/28/);
     assert.doesNotMatch(text(split, 1, '.last-action-val'), /3\.04/);
-    assert.match(text(split, 1, '.last-trim-val'), /2026-11-03/);
+    assert.match(text(split, 1, '.last-trim-val'), /11\/03/);
 
     const explicitNull = await render([market('QQQ'), market('006208.TW', {
         last_signal_change: null, last_excess_trim: null, last_action: trim, last_trim: trim
@@ -81,9 +81,26 @@ const text = (r, i, selector) => r.cards[i].querySelector(selector).textContent;
 
     const precision = await render([market('QQQ'), market('006208.TW', {target_today: 2.8000000000000003, target_yesterday: 2.8})]);
     assert.equal(text(precision, 1, '.delta-badge'), '維持 2.80x');
-    assert.doesNotMatch(precision.global, /變動/);
+    assert.doesNotMatch(precision.global, /變動|修剪/);
+
+    // Bugfixes #1 & #2: position=0 空手試算 與 降檔+DCA 不得自相矛盾
+    const stepDownDca = await render([market('QQQ', {target_today: 0.8, target_yesterday: 0.8}),
+        market('006208.TW', {target_today: 2.8, target_yesterday: 3.0})]);
+    const twCard = stepDownDca.cards[1];
+    twCard.querySelector('.equity-input').value = '1000000';
+    twCard.querySelector('.position-input').value = '0';
+    twCard.querySelector('.position-input').listeners.input();
+    assert.doesNotMatch(text(stepDownDca, 1, '.saved-lev-pill'), /缺實帳欄位/);
+    assert.match(text(stepDownDca, 1, '.saved-lev-pill'), /實質 0\.00x/);
+
+    twCard.querySelector('.position-input').value = '2000000';
+    twCard.querySelector('.dca-input').value = '100000';
+    twCard.querySelector('.dca-input').listeners.input();
+    assert.match(twCard.querySelector('.action-instruction').innerHTML, /舊倉不補買，新資金按 2\.80x 投入/);
+    assert.doesNotMatch(twCard.querySelector('.action-instruction').innerHTML, /免動作/);
 
     const template = fs.readFileSync(path.resolve(__dirname, '..', 'templates', 'index.html'), 'utf8');
+    assert.match(template, /美股 QQQ 70% · 台股 006208 30% · ±10%/);
     assert.match(template, /最近目標變更/); assert.match(template, /最近模擬超標修剪/); assert.match(template, /非實帳/);
-    console.log(JSON.stringify({passed: true, cases: ['legacy_public_snapshot_shape', 'split_history', 'explicit_null_no_fallback', 'current_excess_trim', 'unchanged_rounded_2_8', 'template_labels']}));
+    console.log(JSON.stringify({passed: true, cases: ['legacy_public_snapshot_shape', 'split_history', 'explicit_null_no_fallback', 'current_excess_trim', 'unchanged_rounded_2_8', 'zero_position_and_stepdown_dca_fixes', 'template_labels']}));
 })().catch(error => { console.error(error); process.exitCode = 1; });

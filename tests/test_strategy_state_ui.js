@@ -8,7 +8,7 @@ const source = fs.readFileSync(scriptPath, 'utf8');
 
 class Element {
     constructor() {
-        this.parts = new Map(); this.children = []; this.listeners = {};
+        this.parts = new Map(); this.children = []; this.listeners = {}; this.dataset = {};
         this.textContent = ''; this.innerHTML = ''; this.value = ''; this.className = ''; this.open = false;
         const classes = new Set(['hidden']);
         this.classList = {add: (...xs) => xs.forEach(x => classes.add(x)), remove: (...xs) => xs.forEach(x => classes.delete(x)), contains: x => classes.has(x)};
@@ -63,8 +63,8 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.doesNotMatch(stale.global.textContent, /資料缺失|來源失敗|🟢/);
     assert.match(text(stale, 1, '.delta-badge'), /截至 2026-11-05.*待更新/);
     assert.doesNotMatch(text(stale, 1, '.delta-badge'), /目標變更|本期模擬修剪/);
-    assert.match(text(stale, 1, '.last-action-val'), /2026-11-05.*跌破通道減碼/);
-    assert.match(text(stale, 1, '.last-trim-val'), /2026-11-05.*超標修剪/);
+    assert.match(text(stale, 1, '.last-action-val'), /11\/05.*跌破通道減碼/);
+    assert.match(text(stale, 1, '.last-trim-val'), /11\/05.*超標修剪/);
     const card = stale.cards[1];
     card.querySelector('.equity-input').value = '100000';
     card.querySelector('.position-input').value = '300000';
@@ -136,7 +136,7 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.doesNotMatch(text(cooling, 1, '.strategy-explanation'), /趨勢穩健|無操作/);
     assert.match(text(cooling, 1, '.strategy-explanation'), /實帳超過目標 \+0\.15x 仍須另核/);
     assert.match(cooling.global.textContent, /台股減碼後階梯冷卻中.*餘 9 個市場交易日/);
-    assert.equal(cooling.global.className, 'action-pill warn');
+    assert.equal(cooling.global.className, 'action-pill neutral');
     cases.push('cooldown_remaining_visible_in_both_channels_and_summary');
 
     const concurrent = await render([market('QQQ'), market('006208.TW', {
@@ -145,7 +145,8 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     })]);
     assert.match(concurrent.global.textContent, /模擬超標修剪.*減碼後階梯冷卻中.*餘 5 個市場交易日/);
     assert.match(text(concurrent, 1, '.low-bw-val'), /減碼後階梯冷卻中.*資料日已跌破通道/);
-    assert.match(text(concurrent, 1, '.strategy-explanation'), /冷卻中.*模擬超標修剪/);
+    assert.match(text(concurrent, 1, '.strategy-explanation'), /冷卻中/);
+    assert.match(text(concurrent, 1, '.strategy-headline'), /模擬超標修剪/);
     assert.doesNotMatch(concurrent.global.textContent, /🟢|資料缺失|資料延遲/);
     cases.push('fresh_cooldown_and_current_simulated_trim_are_both_visible');
 
@@ -157,12 +158,13 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.doesNotMatch(text(grace, 1, '.status-badge'), /安全/);
     cases.push('annual_grace_is_not_called_safe');
 
-    const defense = await render([market('QQQ'), market('006208.TW', {in_trend: false, step_idx: 0,
+    const defense = await render([market('QQQ'), market('006208.TW', {in_trend: false, step_idx: 0, deep_bear_active: true,
         strategy_state: state({stage: 'defense_deep', label: 'C1 深熊防禦', cooldown: {...cd, active: false, applies_to_current_stage: false}})})]);
     assert.match(text(defense, 1, '.cooldown-badge'), /防禦階段.*冷卻不適用/);
-    assert.doesNotMatch(text(defense, 1, '.low-bw-val'), /冷卻中/);
+    assert.doesNotMatch(text(defense, 1, '.low-bw-val'), /冷卻中|已處底倉 \(守年線/);
+    assert.match(text(defense, 1, '.low-bw-val'), /已處深熊底倉/);
     assert.match(text(defense, 1, '.strategy-explanation'), /C1 深熊防禦/);
-    cases.push('priority_defense_not_falsely_locked_by_step_timer');
+    cases.push('priority_defense_not_falsely_locked_by_step_timer_and_accurate_low_bw');
 
     const d1 = await render([market('QQQ', {sma_fast_val: 95, sma_bear_val: 95, strategy_state: state({cooldown: cd, d1: {blocked: true},
         blocked_actions: [{action: 'step_up', reason: 'd1_filter', label: 'D1 升檔條件未滿足'}]})}), market('006208.TW')]);
@@ -171,8 +173,9 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.match(text(d1, 0, '.high-bw-val'), /D1 凍結/); // 顯示值四捨五入相等，仍以後端 raw 判定為準。
     cases.push('d1_and_cooldown_coexist');
 
-    const multi = await render([market('QQQ'), market('006208.TW', {strategy_state: state({label: 'Extension 封頂', flags: ['extension', 'bull_accel', 'full'],
-        extension: {capping_active: true, cap: 1.8}, bull_acceleration: {active: true, days_including_data_bar: 17}})})]);
+    const multi = await render([market('QQQ'), market('006208.TW', {ext_guard_active: true, bull_accel_active: true,
+        strategy_state: state({label: 'Extension 封頂', flags: ['extension', 'bull_accel', 'full'],
+            extension: {capping_active: true, cap: 1.8}, bull_acceleration: {active: true, days_including_data_bar: 17}})})]);
     assert.match(text(multi, 1, '.strategy-explanation'), /Extension 封頂 1\.8x.*牛初加速.*17.*階梯已滿載/);
     cases.push('coexisting_flags_are_not_lost_to_stage_priority');
 
@@ -190,9 +193,9 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     cases.push('legacy_never_invents_cooldown');
 
     const boundary = await render([market('QQQ'), market('006208.TW', {strategy_state: state({cooldown: {...cd, active: false, remaining_days: 0, elapsed_days: 10}})})]);
-    assert.match(text(boundary, 1, '.cooldown-badge'), /冷卻已結束/);
-    assert.doesNotMatch(text(boundary, 1, '.low-bw-val'), /冷卻中/);
-    cases.push('cooldown_boundary_uses_backend_state');
+    assert.equal(boundary.cards[1].querySelector('.cooldown-badge').classList.contains('hidden'), true);
+    assert.doesNotMatch(text(boundary, 1, '.low-bw-val'), /冷卻中|冷卻已結束/);
+    cases.push('cooldown_boundary_uses_backend_state_and_hides_inactive_badge');
 
     const annual = await render([market('QQQ', {in_trend: false, step_idx: 0, close: 690.38,
         target_today: .8, target_yesterday: .8, sma_fast_val: 669.53, sma_slow_val: 675.04,

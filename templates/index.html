@@ -8,11 +8,11 @@
     <meta name="apple-mobile-web-app-title" content="動態槓桿">
     <meta name="theme-color" content="#070a12">
     <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230b1120'/><text y='70' x='50' font-size='58' text-anchor='middle'>⚡</text></svg>">
-    <title>動態槓桿 // DYNAMIC LEVERAGE v3.1</title>
+    <title>動態槓桿 // DYNAMIC LEVERAGE v3.2</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=34">
+    <link rel="stylesheet" href="/static/style.css?v=36">
 </head>
 <body>
     <div class="terminal-shell">
@@ -21,8 +21,8 @@
             <div class="brand-group">
                 <div class="brand-dot"></div>
                 <div>
-                    <div class="brand-title">動態槓桿 · DYNAMIC LEVERAGE <span class="ver-tag">v3.1</span></div>
-                    <div class="brand-sub">US QQQ 60% · TW 006208 40% · EOD Close System</div>
+                    <div class="brand-title">動態槓桿 · DYNAMIC LEVERAGE <span class="ver-tag">v3.2</span></div>
+                    <div class="brand-sub">美股 QQQ 70% · 台股 006208 30% · ±10% 半年寬帶 (1/7月) · EOD Close</div>
                 </div>
             </div>
             <div class="topbar-meta">
@@ -38,6 +38,37 @@
                 <p>正在同步 EOD 市場訊號...</p>
             </div>
         </main>
+
+        <!-- 半年跨市場配比檢核 (預設折疊，不增加日常版面雜訊) -->
+        <details id="rebal-panel" class="panel rebal-drawer">
+            <summary class="rebal-summary-bar">
+                <div class="rebal-bar-left">
+                    <span class="rebal-title">⚖️ 半年跨市場配比檢核 · 目標 美 70% / 台 30%（±10% 寬帶：1/7 月初檢查，中間不動）</span>
+                    <span id="rebal-status-pill" class="saved-lev-pill font-mono hidden"></span>
+                </div>
+                <span class="drawer-chevron">展開試算 ▾</span>
+            </summary>
+            <div class="calc-body">
+                <div class="calc-inputs-grid">
+                    <div class="field">
+                        <label>美股總淨值 (USD) <span class="auto-save-tag">含 IB01/現金</span></label>
+                        <input type="number" id="rebal-us-usd" class="font-mono" placeholder="例: 215000" min="0" step="any" inputmode="decimal">
+                    </div>
+                    <div class="field">
+                        <label>台股總淨值 (TWD) <span class="auto-save-tag">含保證金/備援</span></label>
+                        <input type="number" id="rebal-tw-twd" class="font-mono" placeholder="例: 3000000" min="0" step="any" inputmode="decimal">
+                    </div>
+                    <div class="field">
+                        <label>USD/TWD 匯率 <span class="auto-save-tag">預設參考</span></label>
+                        <input type="number" id="rebal-fx" class="font-mono" placeholder="32.5" min="1" step="0.01" inputmode="decimal">
+                    </div>
+                </div>
+                <div id="rebal-result" class="action-result hidden">
+                    <div id="rebal-summary" class="calc-summary font-mono"></div>
+                    <div id="rebal-instruction" class="action-instruction"></div>
+                </div>
+            </div>
+        </details>
 
         <!-- 期貨轉倉智能雷達 -->
         <section id="rollover-radar" class="panel rollover-panel">
@@ -57,22 +88,20 @@
     <!-- 市場卡片 Template -->
     <template id="market-card-template">
         <article class="panel market-card">
-            <!-- 卡片頂部：標的名稱與狀態燈 -->
+            <!-- 卡片頂部：標的名稱與單一核心狀態燈（僅顯示生效中之修飾標籤） -->
             <div class="card-top">
                 <div class="title-stack">
                     <div class="title-line">
                         <h2 class="market-name"></h2>
                         <span class="ticker-code font-mono"></span>
-                        <span class="card-date-badge font-mono" style="font-size:0.75rem; opacity:0.85; margin-left:6px;"></span>
+                        <span class="card-date-badge font-mono"></span>
                     </div>
                     <div class="sub-badges">
                         <span class="status-badge"></span>
-                        <span class="stage-badge hidden"></span>
                         <span class="cooldown-badge hidden"></span>
                         <span class="grace-badge hidden"></span>
                         <span class="ext-badge hidden"></span>
                         <span class="accel-badge hidden"></span>
-                        <span class="deep-badge hidden"></span>
                         <span class="stale-badge hidden"></span>
                     </div>
                 </div>
@@ -85,65 +114,67 @@
             <!-- 核心三大指標 (價格 / 目標槓桿 / 動能階梯) -->
             <div class="hero-metrics">
                 <div class="metric-cell">
-                    <span class="metric-label eod-price-label">最新收盤 (EOD)</span>
+                    <span class="metric-label eod-price-label">最新收盤</span>
                     <div class="metric-val font-mono price"></div>
                     <div class="metric-foot font-mono ma-dist-text"></div>
                 </div>
                 <div class="metric-cell highlight-cell">
-                    <span class="metric-label">目標槓桿 (Target)</span>
+                    <span class="metric-label">目標槓桿</span>
                     <div class="metric-val font-mono target-lev"></div>
                     <div class="metric-foot font-mono prev-and-trim"></div>
                 </div>
                 <div class="metric-cell">
-                    <span class="metric-label">動能階梯 (Step)</span>
+                    <span class="metric-label">動能階梯</span>
                     <div class="metric-val font-mono steps"></div>
                     <div class="step-bar-track"></div>
                 </div>
             </div>
 
-            <!-- 2x2 結構化技術防線矩陣 -->
+            <!-- 精簡行動摘要（直接接在核心數據下方，一目瞭然下一步） -->
+            <div class="signal-callout">
+                <p class="strategy-headline"></p>
+                <p class="strategy-explanation"></p>
+            </div>
+
+            <!-- 2x2 精簡防線與事件矩陣（無重複資訊） -->
             <div class="tech-matrix">
                 <div class="tech-item">
                     <span class="tech-k high-bw-label">📈 階梯升檔門檻 (Close)</span>
                     <span class="tech-v font-mono bull-text high-bw-val"></span>
                 </div>
                 <div class="tech-item">
-                    <span class="tech-k">📉 減碼跌破門檻 (Close)</span>
+                    <span class="tech-k low-bw-label">📉 減碼 / 退防門檻</span>
                     <span class="tech-v font-mono warn-text low-bw-val"></span>
                 </div>
                 <div class="tech-item">
-                    <span class="tech-k">🛡️ 快線 / 220MA 年線</span>
-                    <span class="tech-v font-mono fast-slow-ma"></span>
+                    <span class="tech-k ma-summary-label">📐 關鍵均線 (快 / 季60 / 年220)</span>
+                    <span class="tech-v font-mono ma-summary-val"></span>
                 </div>
                 <div class="tech-item">
-                    <span class="tech-k">🚨 60MA / C1 深熊線 (97%)</span>
-                    <span class="tech-v font-mono bear-c1-ma"></span>
-                </div>
-                <div class="tech-item">
-                    <span class="tech-k">🕒 最近目標變更（策略訊號，非成交）</span>
-                    <span class="tech-v font-mono last-action-val">--</span>
-                </div>
-                <div class="tech-item">
-                    <span class="tech-k">✂️ 最近模擬超標修剪（非實帳）</span>
-                    <span class="tech-v font-mono last-trim-val">--</span>
+                    <span class="tech-k">🕒 策略事件紀錄（非實帳成交）</span>
+                    <div class="event-mini-list font-mono">
+                        <div class="event-mini-row"><span class="event-tag">最近目標變更</span> <span class="last-action-val">--</span></div>
+                        <div class="event-mini-row"><span class="event-tag">最近模擬超標修剪</span> <span class="last-trim-val">--</span></div>
+                    </div>
                 </div>
             </div>
 
-            <section class="entry-checklist" aria-label="階梯加碼必要條件">
-                <div class="entry-check-title">階梯加碼檢查 · 四項條件一起看</div>
-                <p class="entry-trend-check"></p>
-                <p class="entry-breakout-check"></p>
-                <p class="entry-d1-check"></p>
-                <p class="entry-cooldown-check"></p>
-                <p class="entry-check-note"></p>
-            </section>
+            <!-- 折疊式四條件進場明細（預設折疊，需查核時點開） -->
+            <details class="check-drawer">
+                <summary class="check-summary-bar">
+                    <span class="check-summary-title">🔍 階梯升檔四條件明細</span>
+                    <span class="drawer-chevron">展開檢核 ▾</span>
+                </summary>
+                <section class="entry-checklist" aria-label="階梯加碼必要條件">
+                    <p class="entry-trend-check"></p>
+                    <p class="entry-breakout-check"></p>
+                    <p class="entry-d1-check"></p>
+                    <p class="entry-cooldown-check"></p>
+                    <p class="entry-check-note"></p>
+                </section>
+            </details>
 
-            <!-- 策略診斷摘要 -->
-            <div class="signal-callout">
-                <p class="strategy-explanation"></p>
-            </div>
-
-            <!-- 折疊式實戰部位與 DCA 試算器 (100% 對齊 engine.run Step 4 單一淨指令) -->
+            <!-- 折疊式實戰部位與 DCA 試算器 (對齊 engine.run Step 4 單一淨指令) -->
             <details class="calc-drawer">
                 <summary class="calc-summary-bar">
                     <div class="calc-bar-left">
@@ -157,27 +188,28 @@
                     <div class="calc-inputs-grid">
                         <div class="field">
                             <label>本市場入金前淨值 <span class="auto-save-tag">實帳記憶</span></label>
-                            <input type="number" class="equity-input font-mono" placeholder="例: 9000000" inputmode="numeric">
+                            <input type="number" class="equity-input font-mono" placeholder="例: 7000000" min="0" inputmode="numeric">
                         </div>
                         <div class="field">
                             <label>調整前總名目曝險 <span class="auto-save-tag">實帳記憶</span></label>
-                            <input type="number" class="position-input font-mono" placeholder="例: 17100000" inputmode="numeric">
+                            <input type="number" class="position-input font-mono" placeholder="例: 14000000" min="0" inputmode="numeric">
                         </div>
                         <div class="field">
                             <label>分配至本市場新資金 DCA (同幣別)</label>
-                            <input type="number" class="dca-input font-mono" placeholder="例: 200000" inputmode="numeric">
+                            <input type="number" class="dca-input font-mono" placeholder="例: 100000" min="0" inputmode="numeric">
                         </div>
                     </div>
-                    <div class="saved-meta-note font-mono" style="font-size:0.75rem; opacity:0.75; margin-top:4px;"></div>
+                    <div class="saved-meta-note font-mono"></div>
                     <div class="action-result hidden">
                         <div class="calc-summary font-mono"></div>
                         <div class="action-instruction"></div>
                     </div>
+                    <div class="calc-sop-tip">💡 小額 DCA 優先存入 70/30 偏輕側生息，遇換檔／修剪／季轉倉再重算整數口數；美股無息美元優先轉入 IB01.L。</div>
                 </div>
             </details>
         </article>
     </template>
 
-    <script src="/static/script.js?v=36"></script>
+    <script src="/static/script.js?v=38"></script>
 </body>
 </html>

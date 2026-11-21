@@ -13,7 +13,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionFormState = new Map();
     const sessionRolloverInputs = {};
 
-    // 新欄位即使為 null 也有明確語義；只有舊 API 才按事件種類有限回退。
     function getMarketEvents(market) {
         const owns = key => Object.prototype.hasOwnProperty.call(market, key);
         const isExcessTrim = event => Boolean(event && String(event.type || '').includes('+0.15x'));
@@ -32,6 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const marketLabel = ticker => ticker === 'QQQ' ? '美股' : ticker === '006208.TW' ? '台股' : ticker;
     const shortDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') ? value.slice(5).replace('-', '/') : (value || '未知');
+
     function getFreshness(market) {
         const status = String(market.data_status || '');
         const fallback = Boolean(market.fallback_used || status.startsWith('fallback'));
@@ -44,8 +44,6 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (stale && !fallback) issues.push(`${marketLabel(market.ticker)}資料新鮮度未確認（資料${shortDate(market.date)}，應有日期待核）`);
         if (fallback) issues.push(`${marketLabel(market.ticker)}來源失敗，使用備援資料（截至${shortDate(market.date)}）`);
         if (other) issues.push(`${marketLabel(market.ticker)}資料來源狀態：${status}`);
-        // 憑證屬於各自的伺服器；GitHub Secrets 不代表 Render 也已設定。
-        // 只呈現固定診斷文案，不把供應商回覆或未知狀態直接插入畫面。
         if ((stale || fallback || other) && market.ticker === 'QQQ' && market.secondary_source
             && market.secondary_source.provider === 'futu') {
             const backupStatus = market.secondary_source.status;
@@ -66,20 +64,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 issues.push(`${marketLabel(market.ticker)}：${backupIssues[backupStatus]}`);
             }
         }
-        return {stale, fallback, blocked: Boolean(stale || fallback || other), issues};
+        return { stale, fallback, blocked: Boolean(stale || fallback || other), issues };
     }
 
     function getStrategyState(market) {
         const state = market.strategy_state;
         return state && state.schema_version === 1 ? state : null;
-    }
-
-    function cooldownText(state) {
-        if (!state || !state.cooldown) return '冷卻資訊未提供（舊版資料）';
-        const cd = state.cooldown;
-        if (cd.active) return `${cooldownDirection(cd)} · 餘 ${cd.remaining_days} 個市場交易日`;
-        if (cd.timer_active && !cd.applies_to_current_stage) return '防禦階段 · 階梯冷卻不適用';
-        return '階梯冷卻已結束';
     }
 
     function cooldownDirection(cd) {
@@ -93,28 +83,68 @@ document.addEventListener('DOMContentLoaded', () => {
         return '階梯冷卻中';
     }
 
-    function channelState(state, action) {
+    function cooldownText(state) {
+        if (!state || !state.cooldown) return '冷卻資訊未提供（舊版資料）';
+        const cd = state.cooldown;
+        if (cd.active) return `${cooldownDirection(cd)} · 餘 ${cd.remaining_days} 個市場交易日`;
+        if (cd.timer_active && !cd.applies_to_current_stage) return '防禦階段 · 階梯冷卻不適用';
+        return '階梯冷卻已結束';
+    }
+
+    // 僅在受阻或資料日有觸發時附註，常態已就緒時不重複文字雜訊。
+    function channelExtraState(state, action, includeD1) {
         if (!state || !state.cooldown) return '冷卻資訊未提供';
-        const reasons = (state.blocked_actions || []).filter(item => item.action === action
-            && !(state.cooldown && state.cooldown.active && item.reason === 'cooldown')).map(item => item.label);
-        if (state.cooldown && state.cooldown.active) {
-            reasons.unshift(`${cooldownDirection(state.cooldown)}，餘 ${state.cooldown.remaining_days} 個市場交易日`);
-        } else reasons.unshift(state.cooldown.applies_to_current_stage ? '冷卻已結束' : '防禦轉換不受階梯冷卻限制');
-        if (state.triggers && state.triggers[action === 'step_up' ? 'breakout_up' : 'breakout_down']) {
-            reasons.push(action === 'step_up' ? '資料日已突破通道' : '資料日已跌破通道');
+        const notes = [];
+        const cd = state.cooldown;
+        if (cd.active) {
+            notes.push(`${cooldownDirection(cd)}，餘 ${cd.remaining_days} 個市場交易日`);
         }
-        return [...new Set(reasons)].join('；');
+        if (includeD1) {
+            const d1Reasons = (state.blocked_actions || []).filter(item => item.action === action && item.reason === 'd1_filter')
+                .map(item => item.label);
+            notes.push(...d1Reasons);
+        }
+        if (state.triggers && state.triggers[action === 'step_up' ? 'breakout_up' : 'breakout_down']) {
+            notes.push(action === 'step_up' ? '資料日已突破通道' : '資料日已跌破通道');
+        }
+        return [...new Set(notes)].join('；');
     }
 
     function bullReentryText(market, state) {
         const fastDays = market.fast_ma_len || (market.ticker === 'QQQ' ? 5 : 8);
         const slowDays = market.slow_ma_len || 220;
-        let value = `重返多頭須收盤 ≥ ${market.sma_slow_val.toFixed(2)} 且 ${fastDays}MA ≥ ${slowDays}MA（目前快線 ${market.sma_fast_val.toFixed(2)}）`;
-        // 原始精度的阻擋原因由後端提供，不用四捨五入的顯示值重新判斷。
+        let value = `重返多頭須收盤 ≥ ${market.sma_slow_val.toFixed(2)} 且 ${fastDays}MA ≥ ${slowDays}MA`;
         const reasons = state && state.priority_defense ? state.priority_defense.reasons || [] : [];
-        if (reasons.includes('fast_below_annual')) value += `；${fastDays}MA仍低於${slowDays}MA`;
-        if (reasons.includes('annual_grace_exhausted')) value += '；收盤仍低於年線';
+        const missing = [];
+        if (reasons.includes('fast_below_annual')) missing.push(`${fastDays}MA仍低於${slowDays}MA`);
+        if (reasons.includes('annual_grace_exhausted')) missing.push('收盤仍低於年線');
+        if (missing.length) value += `（${missing.join('；')}）`;
         return value;
+    }
+
+    function resolvePrimaryStagePill(market, state) {
+        if (!market.in_trend) {
+            if (market.deep_bear_active || (state && state.stage === 'defense_deep')) {
+                return { text: `🚨 C1 深熊減半 (${market.target_today.toFixed(1)}x)`, cls: 'bear' };
+            }
+            if (market.pre_bull_active || (state && state.stage === 'e3b')) {
+                return { text: `⚡ E3b 季線總攻 (${market.target_today.toFixed(1)}x)`, cls: 'accent' };
+            }
+            if (state && state.stage === 'defense_recovered') {
+                return { text: '常態防禦／季線復原', cls: 'accent' };
+            }
+            return { text: '常態防禦底倉', cls: 'bear' };
+        }
+        if (state && state.grace && state.grace.active) {
+            return { text: '多頭狀態', cls: 'warn' };
+        }
+        if (state && state.d1 && state.d1.blocked) {
+            return { text: '多頭 · D1 凍結升檔', cls: 'warn' };
+        }
+        if (market.step_idx >= market.max_steps) {
+            return { text: '多頭 · 滿載巡航', cls: 'bull' };
+        }
+        return { text: '多頭階梯', cls: 'bull' };
     }
 
     function renderEntryChecks(card, market, state, freshness) {
@@ -126,21 +156,25 @@ document.addEventListener('DOMContentLoaded', () => {
         const inGrace = state && state.grace && state.grace.active;
         const trendStatus = market.in_trend ? (inGrace ? '維持中（年線容忍）' : '已恢復') : '尚未恢復';
         card.querySelector('.entry-trend-check').textContent = `① 多頭狀態：${trendStatus}。恢復須收盤 ≥ ${slowDays}MA，且 ${fastDays}MA ≥ ${slowDays}MA；恢復多頭不代表直接加碼。`;
-        const breakout = state && state.triggers && typeof state.triggers.breakout_up === 'boolean'
-            ? (state.triggers.breakout_up ? '已突破' : '未突破') : '判定未提供';
+        const breakoutBool = state && state.triggers && typeof state.triggers.breakout_up === 'boolean'
+            ? state.triggers.breakout_up : null;
+        const breakout = breakoutBool === null ? '判定未提供' : (breakoutBool ? '已突破' : '未突破');
         card.querySelector('.entry-breakout-check').textContent = `② 收盤突破：${breakout}。收盤 ${market.close.toFixed(2)} 須 > 前 ${upDays} 日最高收盤 ${market.high_bw.toFixed(2)}。`;
         let d1Text = '③ D1 濾網：本市場不啟用。';
+        let d1Pass = true;
         if (d1Enabled) {
-            // 防禦階段的 d1.blocked=false 表示未啟用升檔，不能顯示為已通過。
             const status = !market.in_trend ? '恢復多頭後仍須核對'
                 : state && state.d1 ? (state.d1.blocked ? '未通過' : '已通過') : '判定未提供';
+            d1Pass = Boolean(market.in_trend && state && state.d1 && !state.d1.blocked);
             const bear = Number.isFinite(market.sma_bear_val) ? market.sma_bear_val.toFixed(2) : '待更新';
             d1Text = `③ D1 濾網：${status}。${fastDays}MA ${market.sma_fast_val.toFixed(2)} 須 ≥ 60MA ${bear}。`;
         }
         card.querySelector('.entry-d1-check').textContent = d1Text;
         const cd = state && state.cooldown;
         let cooldown = '判定未提供';
+        let cdPass = false;
         if (cd && Number.isFinite(cd.remaining_days)) {
+            cdPass = cd.remaining_days <= 0;
             cooldown = cd.remaining_days > 0 ? `尚餘 ${cd.remaining_days} 個市場交易日` : '已完成';
             if (cd.step_event_on_data_bar) cooldown = `本期階梯動作已生效；新冷卻${cooldown}`;
         }
@@ -149,33 +183,173 @@ document.addEventListener('DOMContentLoaded', () => {
             ? '資料待更新，以上僅供截至資料日參考；暫不提供本期調倉指示。'
             : market.step_idx >= market.max_steps ? '已在最高階梯，不再升檔；目標仍依封頂與防禦規則計算。'
                 : '階梯升檔須同時滿足以上必要條件，目標仍受封頂規則限制；條件可在同一收盤日一起成立。';
+
+        const checkSummaryTitle = card.querySelector('.check-summary-title');
+        if (checkSummaryTitle) {
+            const activeChecks = [Boolean(market.in_trend), breakoutBool === true];
+            if (d1Enabled) activeChecks.push(d1Pass);
+            activeChecks.push(cdPass);
+            const passed = activeChecks.filter(Boolean).length;
+            const total = activeChecks.length;
+            if (market.step_idx >= market.max_steps) {
+                checkSummaryTitle.textContent = `🔍 階梯升檔四條件明細 · 已滿載 (${market.step_idx}/${market.max_steps})`;
+            } else if (!market.in_trend) {
+                checkSummaryTitle.textContent = `🔍 階梯升檔四條件明細 · 防禦期未啟用 (${passed}/${total})`;
+            } else {
+                checkSummaryTitle.textContent = `🔍 階梯升檔四條件明細 · ${passed}/${total} 條件成立`;
+            }
+        }
     }
 
-    function strategySummary(market, state, freshness, changed, trimmed) {
-        const parts = [`截至 ${market.date} 資料日：${state ? state.label : (market.in_trend ? '多頭狀態' : '防禦狀態')}`];
-        if (state) {
-            parts.push(cooldownText(state));
-            if (state.cooldown && state.cooldown.step_event_on_data_bar) parts.push('資料日階梯動作已生效，新冷卻自該動作起算');
-            if (state.grace && state.grace.active) parts.push(`年線容忍 ${state.grace.days_elapsed}/${state.grace.days_allowed} 日（連續 ${state.grace.exit_after_consecutive_days} 日才退出）`);
-            if (state.d1 && state.d1.blocked) parts.push('D1 僅凍結升檔，減碼與防禦依原規則');
-            if (state.extension && state.extension.capping_active) parts.push(`Extension 封頂 ${state.extension.cap.toFixed(1)}x`);
-            if (state.bull_acceleration && state.bull_acceleration.active) parts.push(`牛初加速（含資料日餘 ${state.bull_acceleration.days_including_data_bar} 個市場交易日）`);
-            if ((state.flags || []).includes('full')) parts.push('階梯已滿載');
-            if (state.priority_defense && state.priority_defense.bypasses_step_cooldown) parts.push('年線／深熊優先防禦不受階梯冷卻限制');
+    function buildCallout(market, state, freshness, changed, trimmed, excessEvt) {
+        const trimLine = (market.trim_trigger_lev || (market.target_today + 0.15)).toFixed(2);
+        const targetStr = `${market.target_today.toFixed(2)}x`;
+        const fastDays = market.fast_ma_len || (market.ticker === 'QQQ' ? 5 : 8);
+        const slowStr = market.sma_slow_val.toFixed(2);
+        const bearStr = Number.isFinite(market.sma_bear_val) ? market.sma_bear_val.toFixed(2) : '--';
+        const upDays = market.bo_up_len || (market.ticker === 'QQQ' ? 8 : 15);
+        const dnDays = market.bo_dn_len || (market.ticker === 'QQQ' ? 8 : 25);
+
+        let headline = '';
+        let warnBox = false;
+        if (freshness.blocked) {
+            headline = `⚠️ 資料尚未更新（截至 ${market.date}）：僅供舊資料參考，暫停本期確定調倉指示。`;
+            warnBox = true;
+        } else if (changed) {
+            headline = `⚡ 本期目標變更（${market.target_yesterday.toFixed(2)}x ➔ ${targetStr}）：請於執行窗口依下方試算器核對單一淨指令。`;
+            warnBox = true;
+        } else if (trimmed) {
+            const fromStr = excessEvt ? excessEvt.from_lev.toFixed(2) : trimLine;
+            headline = `✂️ 本期觸發模擬超標修剪（${fromStr}x ➔ ${targetStr}）：請核對實帳槓桿是否突破 ${trimLine}x。`;
+            warnBox = true;
         } else {
-            parts.push('舊版資料未提供獨立階段與冷卻計數');
+            headline = `⏸️ 截至 ${market.date} 維持目標 ${targetStr}（無新訊號）：實帳槓桿 ≤ ${trimLine}x 即不動作。`;
         }
-        if (!market.in_trend) {
-            parts.push(bullReentryText(market, state));
-            parts.push('恢復多頭不代表目標立即增加');
-            const upDays = market.bo_up_len || (market.ticker === 'QQQ' ? 8 : 15);
-            parts.push(`進入多頭後，階梯升檔仍須突破 ${upDays} 日通道、冷卻完成${state && state.d1 && state.d1.enabled ? '及通過 D1 濾網' : ''}`);
+
+        const details = [];
+        if (state) {
+            if (state.cooldown && state.cooldown.step_event_on_data_bar) {
+                details.push('資料日階梯動作已生效，冷卻自該動作重算');
+            }
+            if (!market.in_trend) {
+                if (market.deep_bear_active) {
+                    details.push(`🚨 ${state.label}：60MA 低於年線 97% 且 ${fastDays}MA < 60MA (${bearStr})，待快線站回季線即復原常態底倉 ${market.base_leverage.toFixed(1)}x`);
+                } else if (market.pre_bull_active) {
+                    details.push(`⚡ ${state.label}：收盤與快線守穩季線 ≥ ${bearStr}；轉多頭仍須站上年線 ${slowStr}`);
+                } else {
+                    const preBoost = market.ticker === 'QQQ' ? '1.0x' : '1.2x';
+                    details.push(`🛡️ ${state.label}：進入多頭後須突破 ${upDays} 日通道${state.d1 && state.d1.enabled ? '、D1 季線濾網' : ''}與冷卻；若季線下守穩 ${bearStr} 且收盤 > ${market.high_bw.toFixed(2)} 可先觸發 E3b (${preBoost})`);
+                }
+            } else {
+                if (state.grace && state.grace.active) {
+                    details.push(`⚠️ 年線破線容忍 ${state.grace.days_elapsed}/${state.grace.days_allowed} 日（收盤低於年線 ${slowStr} 連續 ${state.grace.exit_after_consecutive_days} 日才退出，或快線死叉即退防禦）`);
+                }
+                if (state.cooldown && state.cooldown.active) {
+                    details.push(`⏳ ${cooldownDirection(state.cooldown)}，餘 ${state.cooldown.remaining_days} 個市場交易日（期間加減碼凍結；破年線防禦與超標修剪除外）`);
+                }
+                if (state.d1 && state.d1.blocked) {
+                    details.push(`🛡️ D1 僅凍結升檔（${fastDays}MA < 60MA ${bearStr}），減碼與防禦照常`);
+                }
+                if (state.extension && state.extension.capping_active) {
+                    details.push(`🌡️ Extension 封頂 ${state.extension.cap.toFixed(1)}x（乖離 >16% 主動鎖利）`);
+                }
+                if (state.bull_acceleration && state.bull_acceleration.active) {
+                    details.push(`🚀 牛初加速底倉 1.2x（含資料日餘 ${state.bull_acceleration.days_including_data_bar} 個市場交易日）`);
+                }
+                if ((state.flags || []).includes('full')) {
+                    details.push(`🔒 階梯已滿載（${market.step_idx}/${market.max_steps}），跌破 ${dnDays} 日低點 < ${market.low_bw.toFixed(2)} 才降檔`);
+                } else if (!(state.grace && state.grace.active) && !(state.cooldown && state.cooldown.active) && !(state.d1 && state.d1.blocked) && !(state.extension && state.extension.capping_active)) {
+                    const downHint = market.step_idx > 0 ? `跌破 < ${market.low_bw.toFixed(2)} 降一檔` : `守 220MA (${slowStr})`;
+                    details.push(`階梯 ${market.step_idx}/${market.max_steps}：收盤 > ${market.high_bw.toFixed(2)} 升一檔、${downHint}`);
+                }
+            }
+            if (!changed && !trimmed && !freshness.blocked) {
+                details.push('實帳超過目標 +0.15x 仍須另核');
+            }
+        } else {
+            details.push('舊版資料未提供獨立階段與冷卻計數；實帳超過目標 +0.15x 仍須另核');
         }
-        if (freshness.blocked) parts.push('資料待更新；舊訊號僅供歷史參考，暫不提供本期調倉指示');
-        else if (changed) parts.push('資料日有新目標變更；實帳是否調整依部位試算');
-        else if (trimmed) parts.push('資料日有模擬超標修剪；請另核實帳');
-        else parts.push('截至資料日無新目標變更；實帳超過目標 +0.15x 仍須另核');
-        return parts.join('；') + '。';
+
+        return { headline, explanation: details.join('；') + '。', warnBox };
+    }
+
+    // 70/30 ±10% 半年跨市場配比檢核（永久記憶於 localStorage，預設折疊）
+    function initRebalChecker() {
+        const panel = document.getElementById('rebal-panel');
+        const usInput = document.getElementById('rebal-us-usd');
+        const twInput = document.getElementById('rebal-tw-twd');
+        const fxInput = document.getElementById('rebal-fx');
+        const resBox = document.getElementById('rebal-result');
+        const sumDiv = document.getElementById('rebal-summary');
+        const instDiv = document.getElementById('rebal-instruction');
+        const pill = document.getElementById('rebal-status-pill');
+        if (!panel || !usInput || !twInput || !fxInput || !resBox) return;
+
+        const STORAGE_KEY = 'moat_cross_alloc_v1';
+        try {
+            const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+            if (saved) {
+                if (saved.us !== undefined) usInput.value = saved.us;
+                if (saved.tw !== undefined) twInput.value = saved.tw;
+                if (saved.fx !== undefined) fxInput.value = saved.fx;
+            }
+        } catch (e) {}
+
+        function evaluate() {
+            const usVal = parseFloat(usInput.value);
+            const twVal = parseFloat(twInput.value);
+            const fxRaw = parseFloat(fxInput.value);
+            const fx = (Number.isFinite(fxRaw) && fxRaw > 0) ? fxRaw : 32.5;
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                    us: usInput.value, tw: twInput.value, fx: fxInput.value
+                }));
+            } catch (e) {}
+
+            if (!Number.isFinite(usVal) || usVal < 0 || !Number.isFinite(twVal) || twVal < 0 || (usVal === 0 && twVal === 0)) {
+                resBox.classList.add('hidden');
+                if (pill) pill.classList.add('hidden');
+                return;
+            }
+            const usTwd = usVal * fx;
+            const totalTwd = usTwd + twVal;
+            const usPct = (usTwd / totalTwd) * 100;
+            const twPct = 100 - usPct;
+            const diffToCenterTwd = totalTwd * 0.70 - usTwd; // >0 代表須從台股匯往美股
+            const inBand = usPct >= 60.0 && usPct <= 80.0;
+            const emergencyTw = twPct > 50.0;
+
+            resBox.classList.remove('hidden');
+            if (pill) {
+                pill.classList.remove('hidden', 'ok', 'danger');
+                pill.classList.add(inBand ? 'ok' : 'danger');
+                pill.textContent = `美 ${usPct.toFixed(1)}% / 台 ${twPct.toFixed(1)}%`;
+            }
+
+            sumDiv.innerHTML =
+                `合計總資產: <strong>NT$ ${fmt(totalTwd)}</strong>（換算匯率 ${fx.toFixed(2)}） ｜ ` +
+                `🇺🇸 美股: <strong>${usPct.toFixed(1)}%</strong> (NT$ ${fmt(usTwd)}) ｜ ` +
+                `🇹🇼 台股: <strong>${twPct.toFixed(1)}%</strong> (NT$ ${fmt(twVal)})`;
+
+            const lighterSide = usPct < 70 ? '🇺🇸 美股帳戶' : '🇹🇼 台股帳戶';
+            if (inBand) {
+                instDiv.innerHTML = `<div class="lev-check lev-ok">✅ <strong>【位於 70/30 ±10% 寬帶內（美 60%~80% / 台 20%~40%）】</strong>無須跨國調倉或電匯！每月新資金請優先存入偏輕側：<strong>${lighterSide}</strong>（目標中心為 美 $${fmt(totalTwd * 0.70 / fx)} / 台 NT$ ${fmt(totalTwd * 0.30)}）。</div>`;
+            } else {
+                const absMoveTwd = Math.abs(diffToCenterTwd);
+                const absMoveUsd = absMoveTwd / fx;
+                const moveDir = diffToCenterTwd > 0
+                    ? `由 🇹🇼 台股移轉 <strong>NT$ ${fmt(absMoveTwd)}</strong>（約 <strong>USD $${fmt(absMoveUsd)}</strong>）至 🇺🇸 美股`
+                    : `由 🇺🇸 美股移轉 <strong>USD $${fmt(absMoveUsd)}</strong>（約 <strong>NT$ ${fmt(absMoveTwd)}</strong>）至 🇹🇼 台股`;
+                if (emergencyTw) {
+                    instDiv.innerHTML = `<div class="lev-check lev-danger">🚨 <strong>【台股超過 50% · 觸發選配極端煞車線】</strong>當前比例偏離為 <strong>美 ${usPct.toFixed(1)}% / 台 ${twPct.toFixed(1)}%</strong>。若按中心拉回 70/30，須 ${moveDir}，避免單一市場過度集中。</div>`;
+                } else {
+                    instDiv.innerHTML = `<div class="lev-check lev-danger">⚠️ <strong>【已超出 70/30 ±10% 寬帶】</strong>當前比例為 <strong>美 ${usPct.toFixed(1)}% / 台 ${twPct.toFixed(1)}%</strong>。<br>• 若今日為 <strong>1 月初或 7 月初半年檢視日</strong>：請一次性 ${moveDir}，拉回 <strong>70/30 中心</strong>（重灌 10% 緩衝）。<br>• 若非檢視日（兩次檢查之間）：<strong>維持不動</strong>，靠每月新資金優先存往 <strong>${lighterSide}</strong> 自然收斂即可。</div>`;
+                }
+            }
+        }
+
+        [usInput, twInput, fxInput].forEach(el => el.addEventListener('input', evaluate));
+        evaluate();
     }
 
     function fetchData(retryCount = 0) {
@@ -196,7 +370,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     ? data.filter(m => m && typeof m === 'object' && typeof m.ticker === 'string' && typeof m.id === 'string' && typeof m.close === 'number' && !isNaN(m.close))
                     : [];
 
-                // F03/F12: 空陣列、非陣列或全 null 元素時明確顯示紅燈錯誤，嚴禁顯示綠燈「今日目標槓桿不變」
                 if (validMarkets.length === 0) {
                     dashboard.innerHTML = `<div class="loading-box" style="color:#ef4444;">🚨 無法取得有效雙市場訊號（空陣列或來源中斷），系統已暫停自動指令，請檢查資料管線。</div>`;
                     dataDateTag.textContent = 'EOD: 資料缺失';
@@ -209,13 +382,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 const seenTickers = new Set(validMarkets.map(m => m.ticker));
                 const hasBothRequired = seenTickers.has('QQQ') && seenTickers.has('006208.TW') && validMarkets.length === 2;
 
-                let anyLevChanged = false;
-                let anyTrimToday = false;
+                const changedNames = [];
+                const trimNames = [];
                 const dataIssues = ['QQQ', '006208.TW'].filter(ticker => !seenTickers.has(ticker))
                     .map(ticker => `${marketLabel(ticker)}市場資料缺失`);
                 if (!hasBothRequired && dataIssues.length === 0) dataIssues.push('市場資料結構異常（重複或額外市場）');
                 const marketDates = [];
-                const stateRestrictions = [];
+                const activeRestrictions = [];
 
                 validMarkets.forEach(market => {
                     if (market.date) {
@@ -224,26 +397,28 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     const freshness = getFreshness(market);
                     const state = getStrategyState(market);
-                    if (state && (state.flags || []).some(flag => ['cooldown', 'grace', 'd1_filter', 'extension', 'extension_threshold'].includes(flag))) {
-                        const restriction = state.cooldown && state.cooldown.active ? cooldownText(state) : state.label;
-                        stateRestrictions.push(`${marketLabel(market.ticker)}${restriction}；目標 ${market.target_today.toFixed(2)}x`);
+                    if (state && (state.flags || []).some(flag => ['cooldown', 'grace', 'd1_filter', 'extension'].includes(flag))) {
+                        const restriction = (state.cooldown && state.cooldown.active)
+                            ? cooldownText(state)
+                            : state.label;
+                        activeRestrictions.push(`${marketLabel(market.ticker)}${restriction}`);
                     }
                     const targetChangedToday = !freshness.blocked && Number(market.target_today).toFixed(2)
                         !== Number(market.target_yesterday).toFixed(2);
-                    if (targetChangedToday) anyLevChanged = true;
+                    if (targetChangedToday) changedNames.push(marketLabel(market.ticker));
                     const events = getMarketEvents(market);
 
                     const isTrimToday = Boolean(
                         !freshness.blocked && !targetChangedToday && events.excess &&
                         events.excess.date === market.date && events.excess.days_ago === 0
                     );
-                    if (isTrimToday) anyTrimToday = true;
+                    if (isTrimToday) trimNames.push(marketLabel(market.ticker));
 
                     dataIssues.push(...freshness.issues);
 
                     if (market.ticker === 'QQQ' && market.close) {
                         window.latestQqqClose = market.close;
-                        const nqBaseSpan = document.querySelector('.ro-nq-base');
+                        const nqBaseSpan = document.querySelector('#rollover-radar .rollover-card[data-market="us"] .ro-nq-base');
                         if (nqBaseSpan) {
                             nqBaseSpan.textContent = `(估算基準 ~${Math.round(market.close * 41.15)}點，非即時NQ報價)`;
                         }
@@ -252,50 +427,37 @@ document.addEventListener('DOMContentLoaded', () => {
                     const clone = template.content.cloneNode(true);
                     const storageKey = `moat_calc_${market.id}`;
 
-                    // 標題、卡片專屬日期與狀態標籤 (F12)
                     clone.querySelector('.market-name').textContent = market.name;
                     clone.querySelector('.ticker-code').textContent = market.ticker;
                     const cardDateBadge = clone.querySelector('.card-date-badge');
                     if (cardDateBadge) {
-                        cardDateBadge.textContent = `EOD: ${market.date || '--'}`;
+                        cardDateBadge.textContent = shortDate(market.date);
                     }
                     const eodPriceLabel = clone.querySelector('.eod-price-label');
                     if (eodPriceLabel && market.date) {
-                        eodPriceLabel.textContent = `最新收盤 (${market.date})`;
+                        eodPriceLabel.textContent = `最新收盤 (${shortDate(market.date)})`;
                     }
 
+                    // 單一主狀態徽章 + 僅於生效中之修飾標籤（不顯示「冷卻已結束」等靜止雜訊）
+                    const primaryPill = resolvePrimaryStagePill(market, state);
                     const badge = clone.querySelector('.status-badge');
-                    if (market.in_trend) {
-                        badge.textContent = '多頭狀態';
-                        badge.classList.add('bull');
-                    } else {
-                        badge.textContent = '防禦狀態';
-                        badge.classList.add('bear');
-                    }
+                    badge.textContent = primaryPill.text;
+                    badge.classList.add(primaryPill.cls);
 
-                    // 附加狀態標籤
                     const extCapVal = market.ext_cap ? market.ext_cap.toFixed(1) : '1.8';
                     const extBadge = clone.querySelector('.ext-badge');
-                    if (market.ext_guard_active) {
-                        extBadge.textContent = `🌡️ 乖離過熱鎖 ${extCapVal}x`;
+                    if (extBadge && market.ext_guard_active) {
+                        extBadge.textContent = `🌡️ 過熱封頂 ${extCapVal}x`;
                         extBadge.classList.remove('hidden');
                     }
                     const accelBadge = clone.querySelector('.accel-badge');
-                    if (market.bull_accel_active) {
+                    if (accelBadge && market.bull_accel_active) {
                         const accelState = state && state.bull_acceleration;
                         const daysText = accelState && Number.isFinite(accelState.days_including_data_bar)
                             ? `含資料日餘 ${accelState.days_including_data_bar} 個市場交易日`
                             : `資料日後餘 ${market.bull_accel_days_left} 個市場交易日`;
                         accelBadge.textContent = `🚀 牛初加速 1.2x (${daysText})`;
                         accelBadge.classList.remove('hidden');
-                    } else if (market.pre_bull_active) {
-                        accelBadge.textContent = `⚡ E3b 季線總攻 (${market.target_today.toFixed(1)}x)`;
-                        accelBadge.classList.remove('hidden');
-                    }
-                    const deepBadge = clone.querySelector('.deep-badge');
-                    if (market.deep_bear_active) {
-                        deepBadge.textContent = `🚨 C1 深熊減半 (${market.target_today.toFixed(1)}x)`;
-                        deepBadge.classList.remove('hidden');
                     }
                     const staleBadge = clone.querySelector('.stale-badge');
                     if (staleBadge && freshness.blocked) {
@@ -303,7 +465,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         staleBadge.classList.remove('hidden');
                     }
                     const cdBadge = clone.querySelector('.cooldown-badge');
-                    if (cdBadge) {
+                    const showCdBadge = Boolean(!state || (state.cooldown && (state.cooldown.active || (state.cooldown.timer_active && !state.cooldown.applies_to_current_stage))));
+                    if (cdBadge && showCdBadge) {
                         cdBadge.textContent = `⏳ ${cooldownText(state)}`;
                         cdBadge.classList.remove('hidden');
                     }
@@ -312,13 +475,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         graceBadge.textContent = `年線容忍 ${state.grace.days_elapsed}/${state.grace.days_allowed} 日`;
                         graceBadge.classList.remove('hidden');
                     }
-                    const stageBadge = clone.querySelector('.stage-badge');
-                    if (stageBadge && state) {
-                        stageBadge.textContent = state.label;
-                        stageBadge.classList.remove('hidden');
-                    }
 
-                    // 今日動作對比 (F11: 區分換檔、當日觸發模擬超標修剪、一般維持)
+                    // 本期訊號徽章
                     const deltaBadge = clone.querySelector('.delta-badge');
                     if (freshness.blocked) {
                         deltaBadge.textContent = `截至 ${market.date}：${market.target_today.toFixed(2)}x（待更新）`;
@@ -334,10 +492,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         deltaBadge.classList.add('hold');
                     }
 
-                    // 三大核心數據
+                    // 核心三指標
                     clone.querySelector('.price').textContent = market.close.toFixed(2);
                     const biasPct = ((market.close / market.sma_slow_val - 1) * 100).toFixed(1);
-                    clone.querySelector('.ma-dist-text').textContent = `年線乖離 ${biasPct >= 0 ? '+' : ''}${biasPct}%`;
+                    clone.querySelector('.ma-dist-text').textContent = `年線 ${market.sma_slow_val.toFixed(1)} (${biasPct >= 0 ? '+' : ''}${biasPct}%)`;
 
                     clone.querySelector('.target-lev').textContent = `${market.target_today.toFixed(2)}x`;
                     const trimLine = market.trim_trigger_lev || (market.target_today + 0.15);
@@ -351,7 +509,19 @@ document.addEventListener('DOMContentLoaded', () => {
                         track.appendChild(seg);
                     }
 
-                    // 2x2 技術防線矩陣
+                    // 精簡行動摘要 Callout
+                    const calloutData = buildCallout(market, state, freshness, targetChangedToday, isTrimToday, events.excess);
+                    const calloutEl = clone.querySelector('.signal-callout');
+                    if (calloutEl && calloutData.warnBox) calloutEl.classList.add('action-warn');
+                    const headlineEl = clone.querySelector('.strategy-headline');
+                    if (headlineEl) headlineEl.textContent = calloutData.headline;
+                    clone.querySelector('.strategy-explanation').textContent = calloutData.explanation;
+
+                    // 2x2 技術防線矩陣（修正防衛區下界語義，且不重複「冷卻已結束」）
+                    const fastDays = market.fast_ma_len || (market.ticker === 'QQQ' ? 5 : 8);
+                    const c1Thresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(1);
+                    const bearStr = Number.isFinite(market.sma_bear_val) ? market.sma_bear_val.toFixed(2) : '--';
+
                     const highBwElem = clone.querySelector('.high-bw-val');
                     const highBwLabel = clone.querySelector('.high-bw-label');
                     if (highBwLabel) highBwLabel.textContent = market.in_trend
@@ -361,8 +531,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (!market.in_trend) {
                         const reentry = bullReentryText(market, state);
                         if (market.pre_bull_active) {
-                            const bearGuardVal = (market.sma_bear_val || market.sma_slow_val).toFixed(1);
-                            highBwElem.textContent = `⚡ 季線總攻中（收盤與快線守季線 ≥${bearGuardVal}）；${reentry}`;
+                            highBwElem.textContent = `⚡ 季線總攻中（收盤與快線守季線 ≥ ${bearStr}）；${reentry}`;
                             highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                         } else if (market.sma_bear_val && market.close >= market.sma_bear_val && market.sma_fast_val >= market.sma_bear_val) {
                             highBwElem.textContent = `⚡ E3b 進場須收盤 > ${market.high_bw.toFixed(2)}；${reentry}`;
@@ -378,51 +547,67 @@ document.addEventListener('DOMContentLoaded', () => {
                         highBwElem.textContent = `🔒 已達 ${market.max_leverage.toFixed(1)}x 滿載上限`;
                         highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                     } else if (isD1Frozen) {
-                        highBwElem.textContent = `收盤仍須 > ${market.high_bw.toFixed(2)}；🛡️ D1 凍結 (待 5MA ≥ 60MA ${market.sma_bear_val.toFixed(2)})`;
+                        highBwElem.textContent = `收盤須 > ${market.high_bw.toFixed(2)} ｜ 🛡️ D1 凍結（待 ${fastDays}MA ≥ 60MA ${bearStr}）`;
                         highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
                     } else {
                         highBwElem.textContent = `> ${market.high_bw.toFixed(2)}`;
                         highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                     }
+                    const upExtra = channelExtraState(state, 'step_up', false);
+                    if (upExtra) highBwElem.textContent += ` ｜ ${upExtra}`;
+                    if (freshness.blocked) highBwElem.textContent += '（舊資料待更新）';
 
                     const lowBwElem = clone.querySelector('.low-bw-val');
-                    if (!market.in_trend || market.step_idx === 0) {
-                        lowBwElem.textContent = `🛡️ 已處底倉 (守年線 ${market.sma_slow_val.toFixed(1)})`;
+                    const lowBwLabel = clone.querySelector('.low-bw-label');
+                    if (lowBwLabel) lowBwLabel.textContent = (market.in_trend && market.step_idx > 0)
+                        ? '📉 階梯減碼 / 退防門檻' : '🛡️ 當前底倉防守線';
+
+                    if (!market.in_trend) {
+                        if (market.deep_bear_active) {
+                            lowBwElem.textContent = `🚨 已處深熊底倉 (${market.target_today.toFixed(1)}x) ｜ ${fastDays}MA ≥ 60MA (${bearStr}) 復原 ${market.base_leverage.toFixed(1)}x`;
+                            lowBwElem.className = 'tech-v font-mono bear-text low-bw-val';
+                        } else if (market.pre_bull_active) {
+                            lowBwElem.textContent = `守季線 60MA (${bearStr})（破線退回常態 ${market.base_leverage.toFixed(1)}x）`;
+                            lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
+                        } else {
+                            lowBwElem.textContent = `C1 深熊線：60MA < ${c1Thresh} 且 ${fastDays}MA < 60MA ➔ 底倉減半`;
+                            lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
+                        }
+                        if (!state) lowBwElem.textContent += ' ｜ 冷卻資訊未提供';
+                    } else if (market.step_idx === 0) {
+                        const exitRule = market.ticker === '006208.TW' ? '連 2 日' : '當日';
+                        lowBwElem.textContent = `已處第 0 階 · 守 220MA (${market.sma_slow_val.toFixed(1)})（${exitRule}破線轉防禦）`;
+                        lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
+                        const dnExtra = channelExtraState(state, 'step_down', false);
+                        if (dnExtra) lowBwElem.textContent += ` ｜ ${dnExtra}`;
                     } else {
-                        lowBwElem.textContent = `< ${market.low_bw.toFixed(2)}`;
+                        lowBwElem.textContent = `< ${market.low_bw.toFixed(2)}（或破年線 ${market.sma_slow_val.toFixed(1)}）`;
+                        lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
+                        const dnExtra = channelExtraState(state, 'step_down', false);
+                        if (dnExtra) lowBwElem.textContent += ` ｜ ${dnExtra}`;
                     }
-                    // 價格門檻與狀態並列；冷卻計數只取後端逐市場 bar 的正式狀態。
-                    highBwElem.textContent += ` ｜ ${channelState(state, 'step_up')}`;
-                    lowBwElem.textContent += ` ｜ ${channelState(state, 'step_down')}`;
-                    if (freshness.blocked) {
-                        highBwElem.textContent += '（截至舊資料日，待更新）';
-                        lowBwElem.textContent += '（截至舊資料日，待更新）';
+                    if (freshness.blocked) lowBwElem.textContent += '（舊資料待更新）';
+
+                    // Box 3: 關鍵均線整併（相容舊 test selectors）
+                    const maSumEl = clone.querySelector('.ma-summary-val');
+                    if (maSumEl) {
+                        maSumEl.textContent = `${fastDays}MA ${market.sma_fast_val.toFixed(1)} / 60MA ${market.sma_bear_val ? market.sma_bear_val.toFixed(1) : '--'} / 年 ${market.sma_slow_val.toFixed(1)}（C1 < ${c1Thresh}）`;
                     }
 
-                    clone.querySelector('.fast-slow-ma').textContent = `${market.sma_fast_val.toFixed(1)} / ${market.sma_slow_val.toFixed(1)}`;
-                    const c1Thresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(1);
-                    clone.querySelector('.bear-c1-ma').textContent = market.sma_bear_val
-                        ? `${market.sma_bear_val.toFixed(1)} / ${c1Thresh}`
-                        : '--';
-
+                    // Box 4: 策略事件紀錄（精簡為兩行）
                     const fmtEvent = (evt, legacy) => {
-                        if (!evt) return legacy ? '舊版未分列；等待資料更新' : '尚無獨立紀錄';
-                        const dTag = evt.days_ago === 0 ? '資料日當期' : `${evt.days_ago}交易日前（相對資料日）`;
-                        return `${evt.date} (${dTag}) ${evt.from_lev.toFixed(2)}x➔${evt.to_lev.toFixed(2)}x [${evt.type}]`;
+                        if (!evt) return legacy ? '舊版未分列；待更新' : '尚無獨立紀錄';
+                        const dTag = evt.days_ago === 0 ? '當期' : `${evt.days_ago}d前`;
+                        return `${shortDate(evt.date)} (${dTag}) ${evt.from_lev.toFixed(2)}x➔${evt.to_lev.toFixed(2)}x [${evt.type}]`;
                     };
                     const lastActElem = clone.querySelector('.last-action-val');
-                    if (lastActElem) {
-                        lastActElem.textContent = fmtEvent(events.signal, events.legacySignal);
-                    }
+                    if (lastActElem) lastActElem.textContent = fmtEvent(events.signal, events.legacySignal);
                     const lastTrimElem = clone.querySelector('.last-trim-val');
-                    if (lastTrimElem) {
-                        lastTrimElem.textContent = fmtEvent(events.excess, events.legacyExcess);
-                    }
+                    if (lastTrimElem) lastTrimElem.textContent = fmtEvent(events.excess, events.legacyExcess);
 
                     renderEntryChecks(clone, market, state, freshness);
-                    clone.querySelector('.strategy-explanation').textContent = strategySummary(market, state, freshness, targetChangedToday, isTrimToday);
 
-                    // 實戰部位與 DCA 試算器 (F04/F05/F11/F20: 100% 對齊 engine.run Step 4 單一淨指令；缺欄位時嚴禁反推實質槓桿或確定淨單)
+                    // 實戰部位與 DCA 試算器（修正 position=0 空手試算與降檔+DCA 自相矛盾文案）
                     const equityInput = clone.querySelector('.equity-input');
                     const positionInput = clone.querySelector('.position-input');
                     const dcaInput = clone.querySelector('.dca-input');
@@ -458,19 +643,21 @@ document.addEventListener('DOMContentLoaded', () => {
                                 marketDate: market.date || ''
                             }));
                             if (savedMetaNote) {
-                                savedMetaNote.textContent = `💾 實帳記憶時間: ${nowIso} (對應訊號日: ${market.date || '--'})`;
+                                savedMetaNote.textContent = `💾 實帳記憶: ${nowIso} (訊號日 ${market.date || '--'})`;
                             }
                         } catch (e) {}
                     }
 
                     function renderConditionalPreview() {
                         const targetToday = market.target_today;
-                        const eqRaw = parseFloat(equityInput.value);
-                        const posRaw = parseFloat(positionInput.value);
+                        const eqValStr = equityInput.value.trim();
+                        const posValStr = positionInput.value.trim();
+                        const eqRaw = parseFloat(eqValStr);
+                        const posRaw = parseFloat(posValStr);
                         const dcaRaw = dcaInput ? parseFloat(dcaInput.value) : 0;
-                        const hasEq = !isNaN(eqRaw) && eqRaw > 0;
-                        const hasPos = !isNaN(posRaw) && posRaw > 0;
-                        const dcaVal = (!isNaN(dcaRaw) && dcaRaw > 0) ? dcaRaw : 0;
+                        const hasEq = eqValStr !== '' && Number.isFinite(eqRaw) && eqRaw > 0;
+                        const hasPos = posValStr !== '' && Number.isFinite(posRaw) && posRaw >= 0;
+                        const dcaVal = (Number.isFinite(dcaRaw) && dcaRaw > 0) ? dcaRaw : 0;
 
                         if (!hasEq && !hasPos && dcaVal <= 0) {
                             resultBox.classList.add('hidden');
@@ -492,18 +679,18 @@ document.addEventListener('DOMContentLoaded', () => {
                                 `條件入金後淨值: <strong>$${fmt(eqAfter)}</strong> ｜ 條件目標總曝險 (${targetToday.toFixed(2)}x): <strong>$${fmt(condTargetPos)}</strong> ｜ ` +
                                 `2/3 保證金池: <strong>$${fmt(marginAcct)}</strong> ｜ 1/3 防禦現金: <strong>$${fmt(idleCash)}</strong>`;
                             instructionDiv.innerHTML =
-                                `<div class="lev-check lev-ok">📐 <strong>【條件試算預覽（尚未輸入目前實帳總曝險）】</strong>若以淨值 <strong>$${fmt(eqAfter)}</strong> 按今日目標 <strong>${targetToday.toFixed(2)}x</strong> 試算，條件目標總曝險為 <strong>$${fmt(condTargetPos)}</strong>。因缺少目前實帳總曝險，系統不推斷實質槓桿或確定買賣金額；請補填「目前總曝險」以計算調倉差額。</div>`;
+                                `<div class="lev-check lev-ok">📐 <strong>【條件試算預覽（尚未輸入目前實帳總曝險）】</strong>若以淨值 <strong>$${fmt(eqAfter)}</strong> 按今日目標 <strong>${targetToday.toFixed(2)}x</strong> 試算，條件目標總曝險為 <strong>$${fmt(condTargetPos)}</strong>。因缺少目前實帳總曝險，請補填（空手請填 0）以計算調倉差額。</div>`;
                         } else if (!hasEq && hasPos) {
                             const condReqEq = Math.round(posRaw / targetToday);
                             summaryDiv.innerHTML =
                                 `已填目前總曝險: <strong>$${fmt(posRaw)}</strong>${dcaVal > 0 ? ` ｜ 擬投入新資金: <strong>$${fmt(dcaVal)}</strong>` : ''} ｜ ` +
                                 `對應 ${targetToday.toFixed(2)}x 所需基準淨值: <strong>$${fmt(condReqEq)}</strong>`;
                             instructionDiv.innerHTML =
-                                `<div class="lev-check lev-ok">📐 <strong>【條件試算預覽（尚未輸入本市場分配淨值 NAV）】</strong>目前已填總曝險 <strong>$${fmt(posRaw)}</strong>${dcaVal > 0 ? ` 與新資金 <strong>$${fmt(dcaVal)}</strong>` : ''}，惟缺少本市場真實淨值 (NAV)，系統嚴禁由目標反推實質槓桿或確定買賣金額（若欲維持 ${targetToday.toFixed(2)}x 需具備約 <strong>$${fmt(condReqEq)}</strong> 淨值）；請補填「分配淨值」以整合計算。</div>`;
+                                `<div class="lev-check lev-ok">📐 <strong>【條件試算預覽（尚未輸入本市場分配淨值 NAV）】</strong>缺少本市場真實淨值 (NAV)，系統嚴禁反推實質槓桿或確定買賣金額；請補填淨值以整合計算。</div>`;
                         } else {
                             const dcaExposure = Math.round(dcaVal * targetToday);
                             summaryDiv.innerHTML = `目標槓桿: <strong>${targetToday.toFixed(2)}x</strong> ｜ 本月分配新資金: <strong>$${fmt(dcaVal)}</strong>`;
-                            instructionDiv.innerHTML = `<div class="lev-check lev-ok">💡【僅輸入新資金條件試算（請補填本市場淨值與目前曝險以整合修剪）】單獨新資金 <strong>$${fmt(dcaVal)}</strong> × <strong>${targetToday.toFixed(2)}x</strong> = 條件增量曝險 <strong>$${fmt(dcaExposure)}</strong>（未含舊倉修剪檢定）。</div>`;
+                            instructionDiv.innerHTML = `<div class="lev-check lev-ok">💡 <strong>【僅輸入新資金條件試算】</strong>單獨新資金 <strong>$${fmt(dcaVal)}</strong> × <strong>${targetToday.toFixed(2)}x</strong> = 條件增量曝險 <strong>$${fmt(dcaExposure)}</strong>（未含舊倉修剪檢定）。</div>`;
                         }
                     }
 
@@ -511,9 +698,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         const targetToday = market.target_today;
                         const prevTarget = market.target_yesterday !== undefined ? market.target_yesterday : targetToday;
                         const rawDca = dcaInput ? parseFloat(dcaInput.value) : 0;
-                        const dcaVal = (!isNaN(rawDca) && rawDca > 0) ? rawDca : 0;
+                        const dcaVal = (Number.isFinite(rawDca) && rawDca > 0) ? rawDca : 0;
 
-                        // Step 3 & Step 4 (engine.py 對齊)：先注入同幣別新資金更新分母 E' = E + C
                         const equityAfterDca = equity + dcaVal;
                         const actualLevBeforeDca = position / equity;
                         const levAfterCash = position / equityAfterDca;
@@ -569,31 +755,31 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         if (isStepUp) {
                             if (netOrder > 0) {
-                                levCheck = `<div class="lev-check lev-danger">📈 <strong>【系統升檔加碼 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>今日目標上調！入金後原始槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 低於新目標。<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險調至 <strong>$${fmt(finalTargetPos)}</strong>，調倉後槓桿 <strong>${plannedL.toFixed(2)}x</strong>，扣 1bp 摩擦後約 ${postFeeLev.toFixed(2)}x）。</div>`;
+                                levCheck = `<div class="lev-check lev-danger">📈 <strong>【系統升檔加碼 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>入金後原始槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 低於新目標。<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險調至 <strong>$${fmt(finalTargetPos)}</strong>，執行後 <strong>${plannedL.toFixed(2)}x</strong>，含 1bp 摩擦約 ${postFeeLev.toFixed(2)}x）。</div>`;
                             } else if (netOrder < 0) {
-                                levCheck = `<div class="lev-check lev-danger">⚠️ <strong>【系統升檔 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x · 實帳已超標須下修】</strong>今日目標雖升至 <strong>${targetToday.toFixed(2)}x</strong>，但你目前實際槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 高於新目標（修剪警戒 ${trimLine.toFixed(2)}x）！<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險由 $${fmt(position)} 壓回 <strong>$${fmt(finalTargetPos)}</strong>，執行後槓桿 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
+                                levCheck = `<div class="lev-check lev-danger">⚠️ <strong>【系統升檔 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x · 實帳已超標須下修】</strong>目前實際槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 已高於新目標！<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險壓回 <strong>$${fmt(finalTargetPos)}</strong>，執行後 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
                             } else {
-                                levCheck = `<div class="lev-check lev-ok">✅ <strong>【系統升檔 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>目前實際槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 已精確對齊目標，${orderTag}。</div>`;
+                                levCheck = `<div class="lev-check lev-ok">✅ <strong>【系統升檔 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>目前實際槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 已對齊目標，${orderTag}。</div>`;
                             }
                         } else if (isStepDn) {
                             if (sigReb && netOrder < 0) {
-                                levCheck = `<div class="lev-check lev-danger">📉 <strong>【系統降檔減碼 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>今日目標下調且入金後實際槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 高於新目標（換檔日不適用 +0.15x 緩衝）！<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險壓回 <strong>$${fmt(finalTargetPos)}</strong>，執行後槓桿 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
+                                levCheck = `<div class="lev-check lev-danger">📉 <strong>【系統降檔減碼 ${prevTarget.toFixed(2)}x ➔ ${targetToday.toFixed(2)}x】</strong>入金後槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 高於新目標（換檔日不適用 +0.15x 緩衝）！<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險壓回 <strong>$${fmt(finalTargetPos)}</strong>，執行後 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
+                            } else if (dcaVal > 0 && netOrder > 0) {
+                                levCheck = `<div class="lev-check lev-ok">💡 <strong>【系統降檔 · 舊倉不補買，新資金按 ${targetToday.toFixed(2)}x 投入】</strong>目標雖由 ${prevTarget.toFixed(2)}x 降至 <strong>${targetToday.toFixed(2)}x</strong>，舊倉實質槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 低於新目標不逆勢補買，僅將本次新資金 <strong>$${fmt(dcaVal)}</strong> 按 <strong>${targetToday.toFixed(2)}x</strong> 投入。<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險 <strong>$${fmt(finalTargetPos)}</strong>，執行後 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
                             } else {
-                                levCheck = `<div class="lev-check lev-ok">✅ <strong>【系統降檔 · 自然衰退免動作 (No-Buy-Down)】</strong>今日目標雖由 ${prevTarget.toFixed(2)}x 降至 <strong>${targetToday.toFixed(2)}x</strong>，但目前實際槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 已低於新目標。<br>🛡️ <strong>單一淨指令：${orderTag}</strong>（嚴禁逆勢加買補倉，維持總曝險 <strong>$${fmt(finalTargetPos)}</strong>，槓桿 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
+                                levCheck = `<div class="lev-check lev-ok">✅ <strong>【系統降檔 · 自然衰退免動作 (No-Buy-Down)】</strong>目標雖由 ${prevTarget.toFixed(2)}x 降至 <strong>${targetToday.toFixed(2)}x</strong>，實質槓桿 <strong>${levAfterCash.toFixed(2)}x</strong> 已低於新目標。<br>🛡️ <strong>單一淨指令：${orderTag}</strong>（嚴禁逆勢加買補倉，維持總曝險 <strong>$${fmt(finalTargetPos)}</strong>，槓桿 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
                             }
                         } else {
-                            // 今日系統目標槓桿未變 (維持原位階)
                             if (trimTriggered) {
-                                levCheck = `<div class="lev-check lev-danger">🚨 <strong>【超標修剪與 DCA 整合淨指令】</strong>入金前槓桿 <strong>${actualLevBeforeDca.toFixed(2)}x</strong>${dcaVal > 0 ? `（注入新資金 $${fmt(dcaVal)} 並按目標加買後計畫槓桿將達 ${rawPlannedL.toFixed(2)}x）` : ''}，突破修剪線 <strong>${trimLine.toFixed(2)}x</strong>！<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險由 $${fmt(position)} 嚴格壓回 <strong>$${fmt(finalTargetPos)}</strong>，執行後槓桿 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
+                                levCheck = `<div class="lev-check lev-danger">🚨 <strong>【超標修剪與 DCA 整合淨指令】</strong>入金前槓桿 <strong>${actualLevBeforeDca.toFixed(2)}x</strong>${dcaVal > 0 ? `（含新資金 $${fmt(dcaVal)} 後將達 ${rawPlannedL.toFixed(2)}x）` : ''}，突破修剪線 <strong>${trimLine.toFixed(2)}x</strong>！<br>⚡ <strong>單一淨指令：${orderTag}</strong>（總曝險壓回 <strong>$${fmt(finalTargetPos)}</strong>，執行後 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
                             } else if (dcaVal > 0) {
-                                levCheck = `<div class="lev-check lev-ok">💡 <strong>【DCA 新資金單向投入整合淨指令】</strong>入金前槓桿 <strong>${actualLevBeforeDca.toFixed(2)}x</strong>，注入新資金 <strong>$${fmt(dcaVal)}</strong> 後稀釋為 <strong>${levAfterCash.toFixed(2)}x</strong>；僅將新資金按 <strong>${targetToday.toFixed(2)}x</strong> 建倉後計畫槓桿為 <strong>${plannedL.toFixed(2)}x</strong>（≤ 修剪線 ${trimLine.toFixed(2)}x，免修剪舊倉）。<br>✅ <strong>單一淨指令：${orderTag}</strong>（目標總曝險 <strong>$${fmt(finalTargetPos)}</strong>，執行後槓桿 <strong>${plannedL.toFixed(2)}x</strong>）。</div>`;
+                                levCheck = `<div class="lev-check lev-ok">💡 <strong>【DCA 新資金單向投入整合淨指令】</strong>入金前 <strong>${actualLevBeforeDca.toFixed(2)}x</strong>，注入 <strong>$${fmt(dcaVal)}</strong> 稀釋至 <strong>${levAfterCash.toFixed(2)}x</strong>，僅新資金按 <strong>${targetToday.toFixed(2)}x</strong> 建倉（執行後 <strong>${plannedL.toFixed(2)}x</strong> ≤ ${trimLine.toFixed(2)}x，免修剪）。<br>✅ <strong>單一淨指令：${orderTag}</strong>（目標總曝險 <strong>$${fmt(finalTargetPos)}</strong>）。</div>`;
                             } else if (actualLevBeforeDca < targetToday) {
-                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLevBeforeDca.toFixed(2)}x</strong>（低於目標 ${targetToday.toFixed(2)}x）— 自然衰退中，<strong>單一淨指令：${orderTag}</strong>，讓利潤奔跑。</div>`;
+                                levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLevBeforeDca.toFixed(2)}x</strong>（低於目標 ${targetToday.toFixed(2)}x）— ${position === 0 ? '目前空手' : '自然衰退中'}，<strong>單一淨指令：${orderTag}</strong>（不追高補倉）。</div>`;
                             } else {
                                 levCheck = `<div class="lev-check lev-ok">✅ 實際槓桿 <strong>${actualLevBeforeDca.toFixed(2)}x</strong>（介於 ${targetToday.toFixed(2)}x ～ ${trimLine.toFixed(2)}x 緩衝帶內）— <strong>單一淨指令：${orderTag}</strong>。</div>`;
                             }
                         }
-
                         instructionDiv.innerHTML = levCheck;
                     }
 
@@ -613,7 +799,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         const posVal = positionInput.value.trim();
                         const equity = parseFloat(eqVal);
                         const position = parseFloat(posVal);
-                        const hasBothReal = (eqVal !== '' && !isNaN(equity) && equity > 0 && posVal !== '' && !isNaN(position) && position > 0);
+                        const hasBothReal = (eqVal !== '' && Number.isFinite(equity) && equity > 0
+                            && posVal !== '' && Number.isFinite(position) && position >= 0);
                         if (hasBothReal) {
                             if (shouldPersistReal) saveState(true);
                             calculateAction(equity, position);
@@ -625,11 +812,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     equityInput.addEventListener('input', () => evaluateInputs(true));
                     positionInput.addEventListener('input', () => evaluateInputs(true));
                     dcaInput.addEventListener('input', () => evaluateInputs(false));
-                    if (calcDrawer) {
-                        calcDrawer.addEventListener('toggle', () => syncSessionFormState());
-                    }
+                    if (calcDrawer) calcDrawer.addEventListener('toggle', () => syncSessionFormState());
 
-                    // F11/R3: 優先恢復本頁面工作階段 (Session) 中正在編輯的表單狀態（含 DCA 欄位），避免 5 分鐘自動重刷沖掉試算
                     const sessionSaved = sessionFormState.get(market.id);
                     if (sessionSaved && (sessionSaved.equity !== '' || sessionSaved.position !== '' || sessionSaved.dca !== '')) {
                         equityInput.value = sessionSaved.equity || '';
@@ -640,22 +824,21 @@ document.addEventListener('DOMContentLoaded', () => {
                             const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
                             if (saved && savedMetaNote && saved.savedAt) {
                                 const staleSaved = saved.marketDate && market.date && saved.marketDate !== market.date;
-                                savedMetaNote.textContent = `💾 實帳記憶時間: ${saved.savedAt}${staleSaved ? ' ⚠️ (跨日舊部位，請更新今日收盤淨值)' : ''}`;
+                                savedMetaNote.textContent = `💾 實帳記憶: ${saved.savedAt}${staleSaved ? ' ⚠️ (跨日舊部位，請更新收盤淨值)' : ''}`;
                             }
                         } catch (e) {}
                         evaluateInputs(false);
                     } else {
-                        // 載入 localStorage 記憶的淨值與部位 (F20: 顯示記憶時間與跨日提醒)
                         try {
                             const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
-                            if (saved && saved.equity && saved.position) {
+                            if (saved && saved.equity !== undefined && saved.equity !== '' && saved.position !== undefined && saved.position !== '') {
                                 equityInput.value = saved.equity;
                                 positionInput.value = saved.position;
                                 if (savedMetaNote) {
                                     const staleSaved = saved.marketDate && market.date && saved.marketDate !== market.date;
                                     savedMetaNote.textContent = saved.savedAt
-                                        ? `💾 實帳記憶時間: ${saved.savedAt}${staleSaved ? ' ⚠️ (跨日舊部位，請更新今日收盤淨值)' : ''}`
-                                        : '💾 已載入上次記憶部位（建議確認是否為最新收盤實帳）';
+                                        ? `💾 實帳記憶: ${saved.savedAt}${staleSaved ? ' ⚠️ (跨日舊部位，請更新收盤淨值)' : ''}`
+                                        : '💾 已載入上次記憶部位（請確認是否為最新收盤實帳）';
                                 }
                                 evaluateInputs(false);
                             }
@@ -665,38 +848,35 @@ document.addEventListener('DOMContentLoaded', () => {
                     dashboard.appendChild(clone);
                 });
 
-                // F12: 頂部同時顯示雙市場收盤日，若跨市場日期不一致則明確標示
+                // 頂部精簡日期顯示（不再重複同一日期三次）
                 if (marketDates.length >= 2) {
                     const allSameDate = marketDates.every(m => m.date === marketDates[0].date);
-                    const pairsStr = marketDates.map(m => `${m.label}: ${m.date}`).join(' ｜ ');
                     dataDateTag.textContent = allSameDate
-                        ? `EOD: ${marketDates[0].date} (${pairsStr})`
-                        : `EOD: ${pairsStr}（各市場交易日分列）`;
+                        ? `EOD ${marketDates[0].date}`
+                        : `${marketDates.map(m => `${m.label} ${shortDate(m.date)}`).join(' · ')}（各市場交易日分列）`;
                 } else if (marketDates.length === 1) {
-                    dataDateTag.textContent = `EOD: ${marketDates[0].label} ${marketDates[0].date} ⚠️ 單一市場缺失`;
+                    dataDateTag.textContent = `EOD ${marketDates[0].label} ${marketDates[0].date} ⚠️ 單一市場缺失`;
                 }
 
-                // F03/F11: 頂部全域動作膠囊優先順序
+                // 頂部精簡全域動作膠囊（去重，無操作時僅精簡一句）
                 if (dataIssues.length) {
-                    globalActionPill.textContent = `⚠️ ${dataIssues.join(' ｜ ')} · 受影響市場暫不提供本期調倉指示`;
+                    globalActionPill.textContent = `⚠️ ${dataIssues.join(' ｜ ')} · 暫停調倉指示`;
                     globalActionPill.className = 'action-pill warn';
-                } else if (anyLevChanged) {
-                    globalActionPill.textContent = '⚡ 資料日有目標槓桿變動 · 請依實帳部位核對';
-                    if (stateRestrictions.length) globalActionPill.textContent += ` ｜ ${stateRestrictions.join(' ｜ ')}`;
+                } else if (changedNames.length) {
+                    globalActionPill.textContent = `⚡ ${changedNames.join(' / ')} 目標槓桿變更 · 請展開試算器核對`;
                     globalActionPill.className = 'action-pill warn';
-                } else if (anyTrimToday) {
-                    globalActionPill.textContent = '⚠️ 資料日觸發模擬超標修剪 · 請核對實帳槓桿是否突破修剪線';
-                    if (stateRestrictions.length) globalActionPill.textContent += ` ｜ ${stateRestrictions.join(' ｜ ')}`;
+                } else if (trimNames.length) {
+                    globalActionPill.textContent = `✂️ ${trimNames.join(' / ')} 模擬超標修剪 · 請核對實帳槓桿`;
+                    if (activeRestrictions.length) globalActionPill.textContent += ` · ${activeRestrictions.join(' ｜ ')}`;
                     globalActionPill.className = 'action-pill warn';
-                } else if (stateRestrictions.length) {
-                    globalActionPill.textContent = `${stateRestrictions.join(' ｜ ')} · 截至資料日無新增目標變更`;
-                    globalActionPill.className = 'action-pill warn';
-                } else {
-                    globalActionPill.textContent = '雙市場截至資料日目標維持 · 實帳 +0.15x 超標另核';
+                } else if (activeRestrictions.length) {
+                    globalActionPill.textContent = `⏸️ 本期目標維持 · ${activeRestrictions.join(' ｜ ')}`;
                     globalActionPill.className = 'action-pill neutral';
+                } else {
+                    globalActionPill.textContent = '✅ 雙市場維持目標 · 實帳超過目標+0.15x才需調整';
+                    globalActionPill.className = 'action-pill bull';
                 }
 
-                // F11: 定期自動重抓最新 EOD 訊號與轉倉雷達（保留既有輸入狀態）
                 setTimeout(() => { fetchData(0); fetchRolloverData(); }, AUTO_REFRESH_MS);
             })
             .catch(err => {
@@ -715,21 +895,25 @@ document.addEventListener('DOMContentLoaded', () => {
             .then(res => res.json())
             .then(data => {
                 container.innerHTML = '';
+                const badgeClsMap = { bull: 'bull', warning: 'warn', bear: 'bear', neutral: 'neutral' };
                 ['tw', 'us'].forEach(key => {
                     const item = data[key];
                     if (!item) return;
 
                     const card = document.createElement('div');
                     card.className = `rollover-card ${item.status_class}`;
-                    const inputPlaceholder = key === 'tw' ? '手動輸入跨月報價點差 (如 -20 或 10)' : '手動輸入跨季報價點差 (如 240)';
+                    card.dataset.market = key;
+                    const badgeCls = badgeClsMap[item.status_class] || 'neutral';
+                    const inputPlaceholder = key === 'tw' ? '例: -20 或 10' : '例: 240';
+                    const spreadTitle = key === 'tw' ? '⚡ 跨月價差試算' : '⚡ 跨季價差試算 <span class="ro-nq-base font-mono"></span>';
 
                     card.innerHTML = `
                         <div class="ro-header-compact">
-                            <div>
+                            <div class="ro-title-group">
                                 <span class="ro-market-name">${item.market}</span>
                                 <span class="ro-contract-tag font-mono">${item.contract_info}</span>
                             </div>
-                            <span class="status-badge ${item.status_class === 'bull' ? 'bull' : 'bear'}">${item.badge}</span>
+                            <span class="status-badge ${badgeCls}">${item.badge}</span>
                         </div>
                         <div class="ro-summary-bar">
                             <span class="ro-countdown-chip font-mono ${item.days_left <= 3 ? 'urgent' : ''}">
@@ -738,7 +922,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <span>${item.action}</span>
                         </div>
                         <div class="ro-input-row">
-                            <label class="ro-input-label">⚡ 手動價差試算 <span class="ro-nq-base font-mono"></span></label>
+                            <label class="ro-input-label">${spreadTitle}</label>
                             <div class="ro-input-wrapper">
                                 <input type="number" class="ro-spread-input font-mono" placeholder="${inputPlaceholder}" step="any">
                                 <span class="ro-input-unit">點</span>
@@ -761,10 +945,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             verdict.classList.remove('hidden');
                             if (isDeadline) {
                                 verdict.className = 'ro-verdict-compact bear';
-                                verdict.innerHTML = `🚨 <strong>【今日 13:30 結算硬期限 · 立即換約】</strong>目前點差 ${spread >= 0 ? '+' : ''}${spread} 點，但今日即為最後結算日，嚴禁等待或延後！請務必於 13:30 前以跨月價差單完成換約避免部位中斷！`;
+                                verdict.innerHTML = `🚨 <strong>【今日 13:30 結算硬期限 · 立即換約】</strong>目前點差 ${spread >= 0 ? '+' : ''}${spread} 點，今日最後結算日嚴禁等待！請務必於 13:30 前完成跨月價差換約！`;
                             } else if (spread <= 0) {
                                 verdict.className = 'ro-verdict-compact bull';
-                                verdict.innerHTML = `🔥 <strong>逆價差送分題 (${spread} 點)</strong>：遠月折價，有利多頭掛跨月價差單換約！`;
+                                verdict.innerHTML = `🔥 <strong>逆價差送分題 (${spread} 點)</strong>：遠月折價，立即掛跨月價差單換約！`;
                             } else if (spread <= 15) {
                                 verdict.className = 'ro-verdict-compact bull';
                                 verdict.innerHTML = `🟢 <strong>價差極窄 (+${spread} 點)</strong>：摩擦極低，建議直接掛價差單換約。`;
@@ -791,7 +975,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             verdict.classList.remove('hidden');
                             if (isDeadline) {
                                 verdict.className = 'ro-verdict-compact bear';
-                                verdict.innerHTML = `🚨 <strong>【結算硬期限 · 立即換約】</strong>目前估算年化隱含成本 ${annRate.toFixed(2)}%，但 NQ/MNQ 於結算日 09:30 ET 美股開盤即停止交易結算！嚴禁因點差偏高而延後，請立即以 Calendar Spread 完成換約！`;
+                                verdict.innerHTML = `🚨 <strong>【結算硬期限 · 立即換約】</strong>估算年化隱含成本 ${annRate.toFixed(2)}%，NQ/MNQ 於結算日 09:30 ET 開盤即停止交易結算！請立即以 Calendar Spread 完成換約！`;
                             } else if (annRate <= 0) {
                                 verdict.className = 'ro-verdict-compact bull';
                                 verdict.innerHTML = `🔥 <strong>罕見逆價差 (估算年化 ${annRate.toFixed(2)}%)</strong>：立即掛單換約！`;
@@ -816,6 +1000,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     }
 
+    initRebalChecker();
     fetchData();
     fetchRolloverData();
 });
