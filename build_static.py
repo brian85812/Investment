@@ -443,7 +443,7 @@ def build(notify=True):
         base_leverage=1.0, max_leverage=3.0,
         fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25, cooldown=10,
         allocs=[0.0, 0.50, 0.75, 0.90, 1.0],
-        grace_days=1,
+        grace_days=0,
         bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40},
         deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5},
         add_above_bear=False,

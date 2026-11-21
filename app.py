@@ -602,7 +602,7 @@ def fetch_robust_market_data(ticker):
 
 def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None, add_above_bear=False, pre_bull_boost=None, breakout_up=None, breakout_dn=None):
     """
-    grace_days: 跌破年線容忍天數（美股 QQQ 為 0，台股 006208 為 1，即連續 2 天破線才確認）
+    grace_days: 跌破年線容忍天數（美股 QQQ 與台股 006208 皆統一為 0，即當日收盤破線即確認退出）
     extension_guard: dict with {'threshold': 1.16, 'cap': 1.8} or None.
     bull_acceleration: dict with {'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40} or None.
     deep_bear_guard: dict with {'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True/False} or None.
@@ -1133,7 +1133,7 @@ def refresh_cache():
                 base_leverage=1.0, max_leverage=3.0,
                 fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25, cooldown=10,
                 allocs=[0.0, 0.50, 0.75, 0.90, 1.0],
-                grace_days=1,
+                grace_days=0,
                 bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40},
                 deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5},
                 add_above_bear=False,

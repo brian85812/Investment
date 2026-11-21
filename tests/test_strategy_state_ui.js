@@ -249,6 +249,14 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.match(text(d1, 0, '.entry-cooldown-check'), /餘 9 個市場交易日/);
     assert.match(text(old, 1, '.entry-cooldown-check'), /判定未提供/);
     cases.push('entry_checklist_preserves_raw_backend_decisions_and_unknown_legacy_state');
+
+    const twG0 = await render([market('QQQ'), market('006208.TW', {
+        step_idx: 0, target_today: 1.0, target_yesterday: 1.0,
+        strategy_state: state({grace: {active: false, days_elapsed: 0, days_allowed: 0, days_remaining: 0, exit_after_consecutive_days: 1}})
+    })]);
+    assert.match(text(twG0, 1, '.low-bw-val'), /當日破線轉防禦/);
+    assert.doesNotMatch(text(twG0, 1, '.low-bw-val'), /連 2 日/);
+    cases.push('tw_grace_zero_shows_same_day_exit_rule');
     console.log(JSON.stringify({passed: true, cases, samples: {
         stale_top: stale.global.textContent,
         stale_delta: text(stale, 1, '.delta-badge'),

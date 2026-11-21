@@ -575,7 +575,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                         if (!state) lowBwElem.textContent += ' ｜ 冷卻資訊未提供';
                     } else if (market.step_idx === 0) {
-                        const exitRule = market.ticker === '006208.TW' ? '連 2 日' : '當日';
+                        const exitDays = (state && state.grace && Number.isFinite(state.grace.exit_after_consecutive_days))
+                            ? state.grace.exit_after_consecutive_days : 1;
+                        const exitRule = exitDays > 1 ? `連 ${exitDays} 日` : '當日';
                         lowBwElem.textContent = `已處第 0 階 · 守 220MA (${market.sma_slow_val.toFixed(1)})（${exitRule}破線轉防禦）`;
                         lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
                         const dnExtra = channelExtraState(state, 'step_down', false);

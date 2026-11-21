@@ -9,7 +9,7 @@ import pandas as pd
 APP_PATH = Path(__file__).resolve().parents[1] / 'app.py'
 TW = dict(name='台股', ticker='006208.TW', base_leverage=1., max_leverage=3.,
           fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25,
-          cooldown=10, allocs=[0., .5, .75, .9, 1.], grace_days=1,
+          cooldown=10, allocs=[0., .5, .75, .9, 1.], grace_days=0,
           bull_acceleration=dict(enable=True, min_bear_days=40, accel_base=1.2, accel_days=252),
           deep_bear_guard=dict(bear_ma=60, ratio=.97, deep_base=.5),
           add_above_bear=False, pre_bull_boost=1.2)
@@ -40,8 +40,9 @@ def fixtures():
         'tw_blocked_down': (down_fixture([125., 124., 123., 122., 121.]), TW),
         'tw_sim_trim_cd': (down_fixture([120.] * 5), TW),
         'tw_exit_during_cd': (down_fixture([126.] * 3 + [80., 80.]), TW),
-        'tw_grace': (frame([100.] * 260 + list(np.arange(101., 122.)) + [95.]), TW),
+        'tw_grace': (frame([100.] * 260 + list(np.arange(101., 122.)) + [95.]), {**TW, 'grace_days': 1}),
         'tw_grace_counter2': (frame([100.] * 260 + list(np.arange(101., 122.)) + [95., 95.]), {**TW, 'grace_days': 3}),
+        'tw_g0_single_day_exit': (frame([100.] * 260 + list(np.arange(101., 122.)) + [95.]), TW),
         'tw_deep': (frame(deep), TW),
         'tw_recovered': (frame(deep + [80.] * 8), TW),
         'tw_e3b': (frame(deep + [80.] * 8 + [81.]), TW),
@@ -112,6 +113,35 @@ class StrategyStateTests(unittest.TestCase):
         r = self.result('tw_grace_counter2')
         self.assertEqual(r['strategy_state']['grace']['days_elapsed'], 2)
         self.assertIn('第2/3', r['explanation'])
+
+    def test_tw_production_grace_zero_exits_on_first_day_below_annual(self):
+        r = self.result('tw_g0_single_day_exit')
+        s = r['strategy_state']
+        self.assertFalse(r['in_trend'])
+        self.assertEqual(r['target_today'], 1.0)
+        self.assertFalse(s['grace']['active'])
+        self.assertEqual((s['grace']['days_allowed'], s['grace']['exit_after_consecutive_days']), (0, 1))
+        self.assertIn('annual_grace_exhausted', s['priority_defense']['reasons'])
+
+        root = Path(__file__).resolve().parents[1]
+        for rel_path in ('app.py', 'build_static.py'):
+            tree = ast.parse((root / rel_path).read_text(encoding='utf-8'))
+            calls = [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'compute_signal'
+                and any(kw.arg == 'ticker' and ast.literal_eval(kw.value) == '006208.TW' for kw in node.keywords)
+            ]
+            self.assertEqual(len(calls), 1, rel_path)
+            grace_kw = next(kw for kw in calls[0].keywords if kw.arg == 'grace_days')
+            self.assertEqual(ast.literal_eval(grace_kw.value), 0, rel_path)
+
+        eng_tree = ast.parse((root / 'scratch' / 'engine.py').read_text(encoding='utf-8'))
+        tw_assign = next(
+            n for n in eng_tree.body
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'TW_P' for t in n.targets)
+        )
+        eng_grace = next(kw for kw in tw_assign.value.keywords if kw.arg == 'grace_days')
+        self.assertEqual(ast.literal_eval(eng_grace.value), 0)
 
     def test_deep_recovery_and_e3b_have_distinct_stages(self):
         for key, stage, target in [('tw_deep', 'defense_deep', .5),

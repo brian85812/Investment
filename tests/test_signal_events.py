@@ -11,7 +11,7 @@ import pandas as pd
 APP_PATH = Path(__file__).resolve().parents[1] / 'app.py'
 TW_PARAMS = dict(name='台股', ticker='006208.TW', base_leverage=1.0, max_leverage=3.0,
                  fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25,
-                 cooldown=10, allocs=[0., .50, .75, .90, 1.], grace_days=1,
+                 cooldown=10, allocs=[0., .50, .75, .90, 1.], grace_days=0,
                  bull_acceleration=dict(enable=True, accel_base=1.2, accel_days=252, min_bear_days=40),
                  deep_bear_guard=dict(bear_ma=60, ratio=.97, deep_base=.5),
                  add_above_bear=False, pre_bull_boost=1.2)
@@ -73,7 +73,7 @@ class SignalEventTests(unittest.TestCase):
         json.dumps(after)  # 新欄位必須保留可序列化的API型別。
 
     def test_target_reduction_does_not_replace_excess_trim_history(self):
-        result = compute_from_source(price_fixture([116., 116., 99., 99.]))
+        result = compute_from_source(price_fixture([116., 116., 99.]))
         signal, trim = result['last_signal_change'], result['last_excess_trim']
         self.assertTrue(result['signal_changed_today'])
         self.assertFalse(result['excess_trim_today'])

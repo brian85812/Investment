@@ -83,7 +83,7 @@ US_P = dict(
 )
 TW_P = dict(
     base=1.0, mx=3.0, f=8, s=220, bo=15, bo_up=15, bo_dn=25, cd=10,
-    allocs=[0, .50, .75, .90, 1], grace_days=1, ext=None, accel=(40, 1.2, 252),
+    allocs=[0, .50, .75, .90, 1], grace_days=0, ext=None, accel=(40, 1.2, 252),
     deep_bear=(60, 0.97, 0.5), add_above_bear=False, pre_bull_boost=1.2
 )
 
