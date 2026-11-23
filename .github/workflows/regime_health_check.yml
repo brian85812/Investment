@@ -1,0 +1,70 @@
+name: Monthly Regime Health Check
+
+on:
+  schedule:
+    # 每月 1 日台北時間 09:00 執行體制健康哨兵（平日無紅燈靜音，有紅燈即時警報；1 月、7 月強制推報表）
+    - cron: '0 9 1 * *'
+      timezone: 'Asia/Taipei'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '執行模式（手動測試預設 force-notify 直接推播 Telegram）'
+        required: true
+        default: 'force-notify'
+        type: choice
+        options:
+          - force-notify
+          - auto
+          - dry-run
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "regime-health-check"
+  cancel-in-progress: false
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 檢出程式碼
+        uses: actions/checkout@v4
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 安裝相依套件
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 執行體制健康檢查與推播 (1~5a)
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          CHECK_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode || 'auto' }}
+        run: python -B -X utf8 regime_health_check.py --mode "$CHECK_MODE" --json-out "$RUNNER_TEMP/regime-health.json"
+
+      - name: 體檢排程失敗時發送 Telegram 故障警報 (6b)
+        if: failure()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          if [ -f regime_health_check.py ]; then
+            python3 regime_health_check.py --notify-ci-failure
+          fi
+
+      - name: 上傳健康檢查 JSON 紀錄
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regime-health-report
+          path: ${{ runner.temp }}/regime-health.json
+          if-no-files-found: warn
+          retention-days: 14

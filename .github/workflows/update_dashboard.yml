@@ -40,6 +40,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh workflow enable "Update Moat Dashboard (Daily & On-Demand)" --repo "${{ github.repository }}" || true
+          gh workflow enable "Monthly Regime Health Check" --repo "${{ github.repository }}" || true
           echo "Keepalive executed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   build-and-deploy:
@@ -118,3 +119,13 @@ jobs:
         with:
           path: dist/.last_notified_event.json
           key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 建置或測試失敗時發送 Telegram 故障警報 (6b)
+        if: failure()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          if [ -f regime_health_check.py ]; then
+            python3 regime_health_check.py --notify-ci-failure
+          fi
