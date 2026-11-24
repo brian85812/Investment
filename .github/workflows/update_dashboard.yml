@@ -94,16 +94,31 @@ jobs:
           python build_static.py --build-only
 
       - name: 設定 GitHub Pages 構件
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: 上傳靜態檔案構件
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: './dist'
 
+      - name: 等待 GitHub Pages 構件索引完成 (防範偶發 eventual-consistency 404)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in $(seq 1 12); do
+            COUNT=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=github-pages" --jq '.total_count' 2>/dev/null || echo 0)
+            if [ "${COUNT:-0}" -ge 1 ]; then
+              echo "github-pages artifact indexed (attempt $i, total_count=$COUNT)"
+              exit 0
+            fi
+            echo "Waiting for github-pages artifact index (attempt $i/12)..."
+            sleep 3
+          done
+          echo "Warning: artifact index check timed out after 36s, proceeding to deploy-pages"
+
       - name: 部署至 GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       - name: 部署成功後發送 Telegram 戰情推播 (F11/F17 部署後推播 + 重試狀態檢查)
         if: success()
