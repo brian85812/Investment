@@ -110,6 +110,8 @@ def _strategy_state_text(signal):
         parts.append('D1 僅凍結升檔')
     if (state.get('bull_acceleration') or {}).get('active'):
         parts.append(f"牛初加速（含資料日餘 {(state['bull_acceleration']).get('days_including_data_bar')} 個市場交易日）")
+    if (state.get('v_rebound') or {}).get('active'):
+        parts.append(f"V轉先鋒保底 {state['v_rebound'].get('lev', 2.0):.1f}x")
     if (state.get('extension') or {}).get('capping_active'):
         parts.append(f"Extension 封頂 {state['extension'].get('cap')}x")
     if (state.get('priority_defense') or {}).get('bypasses_step_cooldown'):
@@ -435,7 +437,8 @@ def build(notify=True):
         extension_guard={'threshold': 1.16, 'cap': 1.8},
         deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True},
         add_above_bear=True,
-        pre_bull_boost=1.0
+        pre_bull_boost=1.0,
+        v_rebound_boost={'win': 20, 'thresh': 0.15, 'lev': 2.0}
     )
     
     tw = compute_signal(
@@ -447,7 +450,8 @@ def build(notify=True):
         bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40},
         deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5},
         add_above_bear=False,
-        pre_bull_boost=1.2
+        pre_bull_boost=1.2,
+        v_rebound_boost={'win': 20, 'thresh': 0.15, 'lev': 2.0}
     )
     
     # F03: 嚴格要求雙市場皆非 None 才構成有效 signals，拒絕單市場缺漏或全空覆寫

@@ -122,10 +122,28 @@ document.addEventListener('DOMContentLoaded', () => {
         return value;
     }
 
+    function isVReboundState(market, state) {
+        return Boolean(
+            market.v_rebound_active ||
+            (state && (state.stage === 'v_rebound' || state.stage === 'v_rebound_handoff'))
+        );
+    }
+
+    function vReboundLev(market, state) {
+        if (Number.isFinite(market.v_rebound_lev)) return market.v_rebound_lev;
+        if (state && state.v_rebound && Number.isFinite(state.v_rebound.lev)) return state.v_rebound.lev;
+        return 2.0;
+    }
+
     function resolvePrimaryStagePill(market, state) {
+        const isVRebound = isVReboundState(market, state);
+        const vLev = vReboundLev(market, state);
         if (!market.in_trend) {
             if (market.deep_bear_active || (state && state.stage === 'defense_deep')) {
                 return { text: `🚨 C1 深熊減半 (${market.target_today.toFixed(1)}x)`, cls: 'bear' };
+            }
+            if (isVRebound) {
+                return { text: `🚀 V轉先鋒 (${vLev.toFixed(1)}x)`, cls: 'bull' };
             }
             if (market.pre_bull_active || (state && state.stage === 'e3b')) {
                 return { text: `⚡ E3b 季線總攻 (${market.target_today.toFixed(1)}x)`, cls: 'accent' };
@@ -134,6 +152,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 return { text: '常態防禦／季線復原', cls: 'accent' };
             }
             return { text: '常態防禦底倉', cls: 'bear' };
+        }
+        if (isVRebound) {
+            return { text: `🚀 V轉先鋒 · 待交棒 (${vLev.toFixed(1)}x)`, cls: 'bull' };
         }
         if (state && state.grace && state.grace.active) {
             return { text: '多頭狀態', cls: 'warn' };
@@ -228,17 +249,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const details = [];
         if (state) {
+            const isVRebound = isVReboundState(market, state);
+            const vState = state.v_rebound || null;
+            const vLev = vReboundLev(market, state);
+            const vTrig = Number.isFinite(market.v_rebound_trigger_price)
+                ? market.v_rebound_trigger_price
+                : (vState && Number.isFinite(vState.trigger_price) ? vState.trigger_price : null);
+            const vLow = Number.isFinite(market.v_rebound_low_val)
+                ? market.v_rebound_low_val
+                : (vState && Number.isFinite(vState.low_val) ? vState.low_val : null);
+            const vRally = Number.isFinite(market.v_rebound_rally_pct)
+                ? market.v_rebound_rally_pct
+                : (vState && Number.isFinite(vState.rally_pct) ? vState.rally_pct : null);
+
             if (state.cooldown && state.cooldown.step_event_on_data_bar) {
                 details.push('資料日階梯動作已生效，冷卻自該動作重算');
             }
             if (!market.in_trend) {
                 if (market.deep_bear_active) {
                     details.push(`🚨 ${state.label}：60MA 低於年線 97% 且 ${fastDays}MA < 60MA (${bearStr})，待快線站回季線即復原常態底倉 ${market.base_leverage.toFixed(1)}x`);
+                } else if (isVRebound) {
+                    details.push(`🚀 ${state.label}：保底 ${vLev.toFixed(1)}x，跌破 ${dnDays} 日低點 ${market.low_bw.toFixed(2)} 或落入 C1 深熊退回底倉；站穩年線後待主階梯 ≥ ${vLev.toFixed(1)}x 無縫交棒`);
                 } else if (market.pre_bull_active) {
                     details.push(`⚡ ${state.label}：收盤與快線守穩季線 ≥ ${bearStr}；轉多頭仍須站上年線 ${slowStr}`);
                 } else {
                     const preBoost = market.ticker === 'QQQ' ? '1.0x' : '1.2x';
                     details.push(`🛡️ ${state.label}：進入多頭後須突破 ${upDays} 日通道${state.d1 && state.d1.enabled ? '、D1 季線濾網' : ''}與冷卻；若季線下守穩 ${bearStr} 且收盤 > ${market.high_bw.toFixed(2)} 可先觸發 E3b (${preBoost})`);
+                }
+                if (!market.deep_bear_active && !isVRebound && vState && vState.enabled && Number.isFinite(vTrig)) {
+                    const lowTxt = Number.isFinite(vLow) ? `20日低 ${vLow.toFixed(2)} ` : '20日低 ';
+                    const rallyTxt = Number.isFinite(vRally) ? `，現 ${vRally >= 0 ? '+' : ''}${vRally.toFixed(1)}%` : '';
+                    details.push(`🚀 V轉先鋒線 ≥ ${vTrig.toFixed(2)}（${lowTxt}+15%${rallyTxt}）`);
                 }
             } else {
                 if (state.grace && state.grace.active) {
@@ -256,9 +297,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (state.bull_acceleration && state.bull_acceleration.active) {
                     details.push(`🚀 牛初加速底倉 1.2x（含資料日餘 ${state.bull_acceleration.days_including_data_bar} 個市場交易日）`);
                 }
+                if (isVRebound) {
+                    details.push(`🚀 V轉先鋒待交棒：保底 ${vLev.toFixed(1)}x 續抱，跌破 ${dnDays} 日低點 < ${market.low_bw.toFixed(2)} 止損；階梯突破 > ${market.high_bw.toFixed(2)} 升達 ≥ ${vLev.toFixed(1)}x 即無縫交棒`);
+                }
                 if ((state.flags || []).includes('full')) {
                     details.push(`🔒 階梯已滿載（${market.step_idx}/${market.max_steps}），跌破 ${dnDays} 日低點 < ${market.low_bw.toFixed(2)} 才降檔`);
-                } else if (!(state.grace && state.grace.active) && !(state.cooldown && state.cooldown.active) && !(state.d1 && state.d1.blocked) && !(state.extension && state.extension.capping_active)) {
+                } else if (!isVRebound && !(state.grace && state.grace.active) && !(state.cooldown && state.cooldown.active) && !(state.d1 && state.d1.blocked) && !(state.extension && state.extension.capping_active)) {
                     const downHint = market.step_idx > 0 ? `跌破 < ${market.low_bw.toFixed(2)} 降一檔` : `守 220MA (${slowStr})`;
                     details.push(`階梯 ${market.step_idx}/${market.max_steps}：收盤 > ${market.high_bw.toFixed(2)} 升一檔、${downHint}`);
                 }
@@ -519,8 +563,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     // 2x2 技術防線矩陣（修正防衛區下界語義，且不重複「冷卻已結束」）
                     const fastDays = market.fast_ma_len || (market.ticker === 'QQQ' ? 5 : 8);
+                    const dnDays = market.bo_dn_len || (market.ticker === 'QQQ' ? 8 : 25);
                     const c1Thresh = (market.sma_slow_val * (market.deep_bear_ratio || 0.97)).toFixed(1);
                     const bearStr = Number.isFinite(market.sma_bear_val) ? market.sma_bear_val.toFixed(2) : '--';
+                    const isVRebound = isVReboundState(market, state);
+                    const vLev = vReboundLev(market, state);
 
                     const highBwElem = clone.querySelector('.high-bw-val');
                     const highBwLabel = clone.querySelector('.high-bw-label');
@@ -543,6 +590,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     } else if (market.ext_guard_active) {
                         highBwElem.textContent = `🌡️ 過熱封頂 ${extCapVal}x (>${market.high_bw.toFixed(1)})`;
                         highBwElem.className = 'tech-v font-mono warn-text high-bw-val';
+                    } else if (isVRebound) {
+                        highBwElem.textContent = `🚀 保底 ${vLev.toFixed(1)}x 待階梯升檔 > ${market.high_bw.toFixed(2)} 無縫交棒${isD1Frozen ? `（尚待 ${fastDays}MA ≥ 60MA ${bearStr}）` : ''}`;
+                        highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
                     } else if (market.step_idx >= market.max_steps) {
                         highBwElem.textContent = `🔒 已達 ${market.max_leverage.toFixed(1)}x 滿載上限`;
                         highBwElem.className = 'tech-v font-mono bull-text high-bw-val';
@@ -559,13 +609,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const lowBwElem = clone.querySelector('.low-bw-val');
                     const lowBwLabel = clone.querySelector('.low-bw-label');
-                    if (lowBwLabel) lowBwLabel.textContent = (market.in_trend && market.step_idx > 0)
-                        ? '📉 階梯減碼 / 退防門檻' : '🛡️ 當前底倉防守線';
+                    if (lowBwLabel) lowBwLabel.textContent = isVRebound
+                        ? '🚀 V轉先鋒止損門檻'
+                        : ((market.in_trend && market.step_idx > 0) ? '📉 階梯減碼 / 退防門檻' : '🛡️ 當前底倉防守線');
 
                     if (!market.in_trend) {
                         if (market.deep_bear_active) {
                             lowBwElem.textContent = `🚨 已處深熊底倉 (${market.target_today.toFixed(1)}x) ｜ ${fastDays}MA ≥ 60MA (${bearStr}) 復原 ${market.base_leverage.toFixed(1)}x`;
                             lowBwElem.className = 'tech-v font-mono bear-text low-bw-val';
+                        } else if (isVRebound) {
+                            lowBwElem.textContent = `🚀 V轉先鋒止損：< ${market.low_bw.toFixed(2)}（${dnDays}日低）或落入 C1 深熊 ➔ 退回底倉`;
+                            lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
                         } else if (market.pre_bull_active) {
                             lowBwElem.textContent = `守季線 60MA (${bearStr})（破線退回常態 ${market.base_leverage.toFixed(1)}x）`;
                             lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
@@ -574,6 +628,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
                         }
                         if (!state) lowBwElem.textContent += ' ｜ 冷卻資訊未提供';
+                    } else if (isVRebound) {
+                        lowBwElem.textContent = `🚀 V轉先鋒止損：< ${market.low_bw.toFixed(2)}（${dnDays}日低）或落入 C1 深熊 ➔ 退回底倉`;
+                        lowBwElem.className = 'tech-v font-mono warn-text low-bw-val';
+                        const dnExtra = channelExtraState(state, 'step_down', false);
+                        if (dnExtra) lowBwElem.textContent += ` ｜ ${dnExtra}`;
                     } else if (market.step_idx === 0) {
                         const exitDays = (state && state.grace && Number.isFinite(state.grace.exit_after_consecutive_days))
                             ? state.grace.exit_after_consecutive_days : 1;

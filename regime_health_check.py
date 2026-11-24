@@ -18,16 +18,18 @@ from zoneinfo import ZoneInfo
 
 TZ_TAIPEI = ZoneInfo('Asia/Taipei')
 
-# 100% 對齊 engine.py / app.py / build_static.py 定案參數（grace_days=0、Scheme C、70/30 ±10%）
+# 100% 對齊 engine.py / app.py / build_static.py 定案參數（grace_days=0、Scheme C、70/30 ±10%、V轉先鋒 2.0x）
 US_P = dict(
     base=0.8, mx=3.0, f=5, s=220, bo_up=8, bo_dn=8, cd=8,
     allocs=(0.0, 0.65, 0.85, 1.0), grace_days=0, ext=(1.16, 1.8), accel=None,
     deep_bear=(60, 0.97, 0.4), add_above_bear=True, pre_bull_boost=1.0,
+    v_rebound=(20, 0.15, 2.0),
 )
 TW_P = dict(
     base=1.0, mx=3.0, f=8, s=220, bo_up=15, bo_dn=25, cd=10,
     allocs=(0.0, 0.50, 0.75, 0.90, 1.0), grace_days=0, ext=None, accel=(40, 1.2, 252),
     deep_bear=(60, 0.97, 0.5), add_above_bear=False, pre_bull_boost=1.2,
+    v_rebound=(20, 0.15, 2.0),
 )
 PORTFOLIO_WEIGHTS = {'US': 0.70, 'TW': 0.30}
 SEMI_BAND = 0.10  # 60% ~ 80% 寬帶
@@ -308,6 +310,8 @@ def compute_target_lev_series(close_s, params):
     pre_bull_boost = params.get('pre_bull_boost')
     bear_ma = deep_bear[0] if deep_bear else (60 if (add_above_bear or pre_bull_boost is not None) else None)
     bma_arr = close_s.rolling(bear_ma).mean().to_numpy(dtype=float) if bear_ma else None
+    v_rebound = params.get('v_rebound')
+    low_v_arr = close_s.rolling(v_rebound[0]).min().to_numpy(dtype=float) if v_rebound else None
 
     allocs = params['allocs']
     base = params['base']
@@ -326,12 +330,14 @@ def compute_target_lev_series(close_s, params):
     def_days = 0
     acc_left = 0
     pre_bull_on = False
+    v_on = False
 
     for i in range(1, n):
         if np.isnan(s_arr[i - 1]) or np.isnan(h_arr[i - 1]) or np.isnan(lo_arr[i - 1]):
             continue
         p0, sf, ss, h, lo = c[i - 1], f_arr[i - 1], s_arr[i - 1], h_arr[i - 1], lo_arr[i - 1]
         bma = bma_arr[i - 1] if bma_arr is not None else np.nan
+        lv = low_v_arr[i - 1] if low_v_arr is not None else np.nan
 
         below = below + 1 if p0 < ss else 0
         if sf < ss or below > grace_days:
@@ -360,9 +366,11 @@ def compute_target_lev_series(close_s, params):
 
         cur_b = base
         if not in_tr:
-            if deep_bear is not None and not np.isnan(bma) and bma < ss * deep_bear[1] and sf < bma:
+            is_deep = (deep_bear is not None and not np.isnan(bma) and bma < ss * deep_bear[1] and sf < bma)
+            if is_deep:
                 cur_b = deep_bear[2]
                 pre_bull_on = False
+                v_on = False
             elif pre_bull_boost is not None and not np.isnan(bma):
                 if p0 >= bma and sf >= bma:
                     if p0 > h:
@@ -371,12 +379,25 @@ def compute_target_lev_series(close_s, params):
                     pre_bull_on = False
                 if pre_bull_on:
                     cur_b = pre_bull_boost
+            if v_rebound and not is_deep and not np.isnan(lv) and lv > 0:
+                if not v_on and (p0 / lv - 1.0) >= v_rebound[1]:
+                    v_on = True
+                elif v_on and p0 < lo:
+                    v_on = False
+        else:
+            if v_on and p0 < lo:
+                v_on = False
 
         if accel and in_tr and acc_left > 0:
             cur_b = accel[1]
             acc_left -= 1
 
         lev = cur_b * (1.0 - allocs[step]) + mx * allocs[step]
+        if v_rebound and v_on:
+            if in_tr and lev >= v_rebound[2]:
+                v_on = False
+            else:
+                lev = max(lev, v_rebound[2])
         if ext and in_tr and (p0 / ss) > ext[0]:
             lev = min(lev, ext[1])
         out[i] = lev

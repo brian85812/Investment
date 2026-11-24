@@ -204,6 +204,79 @@ class StrategyStateTests(unittest.TestCase):
         for phrase in ['今日請', '今日無須', '今日完全不動作', '請掛限價']:
             self.assertNotIn(phrase, r['explanation'])
 
+    def test_v_rebound_triggers_exits_and_hands_off_seamlessly(self):
+        tw_v = {**TW, 'v_rebound_boost': {'win': 20, 'thresh': 0.15, 'lev': 2.0}}
+        us_v = {**US, 'v_rebound_boost': {'win': 20, 'thresh': 0.15, 'lev': 2.0}}
+
+        # 1) C1 deep bear overrides V-rebound even after a +16% bounce from low
+        r_deep = compute(frame([200.] * 260 + [150.] * 35 + [175.]), us_v)
+        self.assertTrue(r_deep['deep_bear_active'])
+        self.assertFalse(r_deep['v_rebound_active'])
+        self.assertEqual(r_deep['target_today'], 0.4)
+        self.assertEqual(r_deep['strategy_state']['stage'], 'defense_deep')
+
+        # 2) Below 220MA (not deep bear): +15.6% bounce from 20d low activates 2.0x
+        base_bounce = [200.] * 260 + [160.] * 8 + [185.]
+        r_on = compute(frame(base_bounce), tw_v)
+        self.assertFalse(r_on['in_trend'])
+        self.assertFalse(r_on['deep_bear_active'])
+        self.assertTrue(r_on['v_rebound_active'])
+        self.assertEqual(r_on['target_today'], 2.0)
+        self.assertEqual(r_on['strategy_state']['stage'], 'v_rebound')
+        self.assertIn('v_rebound', r_on['strategy_state']['flags'])
+        self.assertEqual(r_on['last_signal_change']['type'], 'V轉先鋒啟動')
+
+        # 3) Falling below 25d low stops out V-rebound back to base defense
+        r_stop = compute(frame(base_bounce + [159.]), tw_v)
+        self.assertFalse(r_stop['in_trend'])
+        self.assertFalse(r_stop['v_rebound_active'])
+        self.assertEqual(r_stop['target_today'], 1.0)
+        self.assertEqual(r_stop['last_signal_change']['type'], 'V轉先鋒止損')
+
+        # 4) Reclaiming 220MA at step=0 keeps 2.0x floor (seamless handoff, zero whipsaw drop to 1.0x)
+        reclaim_seq = base_bounce + [199.] * 9
+        r_handoff = compute(frame(reclaim_seq), tw_v)
+        self.assertTrue(r_handoff['in_trend'])
+        self.assertEqual(r_handoff['step_idx'], 0)
+        self.assertTrue(r_handoff['v_rebound_active'])
+        self.assertEqual(r_handoff['target_today'], 2.0)
+        self.assertEqual(r_handoff['strategy_state']['stage'], 'v_rebound_handoff')
+
+        # 5) Stepping up >= 2.0x hands off cleanly to main step ladder
+        r_handed = compute(frame(reclaim_seq + [201.]), tw_v)
+        self.assertTrue(r_handed['in_trend'])
+        self.assertEqual(r_handed['step_idx'], 1)
+        self.assertFalse(r_handed['v_rebound_active'])
+        self.assertEqual(r_handed['target_today'], 2.0)
+        self.assertEqual(r_handed['strategy_state']['stage'], 'bull')
+
+    def test_four_engine_v_rebound_parity(self):
+        root = Path(__file__).resolve().parents[1]
+        expected_dict = {'win': 20, 'thresh': 0.15, 'lev': 2.0}
+        expected_tuple = (20, 0.15, 2.0)
+
+        for rel_path in ('app.py', 'build_static.py'):
+            tree = ast.parse((root / rel_path).read_text(encoding='utf-8'))
+            calls = [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'compute_signal'
+                and any(kw.arg == 'ticker' and ast.literal_eval(kw.value) in ('QQQ', '006208.TW') for kw in node.keywords)
+            ]
+            self.assertEqual(len(calls), 2, rel_path)
+            for call in calls:
+                vr_kw = next(kw for kw in call.keywords if kw.arg == 'v_rebound_boost')
+                self.assertEqual(ast.literal_eval(vr_kw.value), expected_dict, rel_path)
+
+        for rel_path in ('scratch/engine.py', 'regime_health_check.py'):
+            tree = ast.parse((root / rel_path).read_text(encoding='utf-8'))
+            for var_name in ('US_P', 'TW_P'):
+                assign = next(
+                    n for n in tree.body
+                    if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == var_name for t in n.targets)
+                )
+                vr_kw = next(kw for kw in assign.value.keywords if kw.arg == 'v_rebound')
+                self.assertEqual(ast.literal_eval(vr_kw.value), expected_tuple, f'{rel_path}:{var_name}')
+
 
 if __name__ == '__main__':
     unittest.main()

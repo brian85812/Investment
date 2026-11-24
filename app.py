@@ -600,7 +600,7 @@ def fetch_robust_market_data(ticker):
         df.attrs['secondary_source'] = secondary_source
     return df
 
-def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None, add_above_bear=False, pre_bull_boost=None, breakout_up=None, breakout_dn=None):
+def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None, add_above_bear=False, pre_bull_boost=None, breakout_up=None, breakout_dn=None, v_rebound_boost=None):
     """
     grace_days: 跌破年線容忍天數（美股 QQQ 與台股 006208 皆統一為 0，即當日收盤破線即確認退出）
     extension_guard: dict with {'threshold': 1.16, 'cap': 1.8} or None.
@@ -608,6 +608,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     deep_bear_guard: dict with {'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True/False} or None.
     add_above_bear: 是否要求 FastMA >= 60MA 才允許向上突破升檔（美股 QQQ 啟用 D1-US 為 True，台股為 False）
     pre_bull_boost: E3b 季線右側總攻底倉（年線下若站穩 60MA 且突破 High_up，底倉升至美 1.0x / 台 1.2x）
+    v_rebound_boost: dict with {'win': 20, 'thresh': 0.15, 'lev': 2.0} or None（V 轉先鋒無縫交棒）
     """
     df = fetch_robust_market_data(ticker)
     if df is None or len(df) == 0:
@@ -621,7 +622,12 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         w_up = breakout_up if breakout_up is not None else breakout_window
         w_dn = breakout_dn if breakout_dn is not None else breakout_window
 
-    if 'Close' not in df.columns or len(df) < max(slow_ma, w_up + 1, w_dn + 1):
+    v_win = int(v_rebound_boost['win']) if v_rebound_boost else None
+    v_thresh = float(v_rebound_boost['thresh']) if v_rebound_boost else None
+    v_lev = float(v_rebound_boost['lev']) if v_rebound_boost else None
+
+    min_len = max(slow_ma, w_up + 1, w_dn + 1, v_win or 0)
+    if 'Close' not in df.columns or len(df) < min_len:
         return None
 
     max_idx = len(allocs) - 1
@@ -631,6 +637,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     target_history = []
     deep_bear_history = []
     pre_bull_history = []
+    v_rebound_history = []
 
     sim_L = base_leverage
     last_action_event = None  # 記錄最近一次任何部位調整 (含加碼/減碼/+0.15x修剪)
@@ -653,6 +660,9 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         bear_w = deep_bear_guard.get('bear_ma', 60) if deep_bear_guard else 60
         df['SMA_bear'] = df['Close'].rolling(window=bear_w).mean()
         subset_cols.append('SMA_bear')
+    if v_rebound_boost:
+        df['Low_v'] = df['Close'].rolling(window=v_win).min()
+        subset_cols.append('Low_v')
 
     df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=subset_cols)
     if df.empty:
@@ -663,6 +673,8 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     accel_left = 0
     below_ma_counter = 0
     pre_bull_on = False
+    v_rebound_on = False
+    v_rebound_holding = False
     last_step_event = None  # 只觀測階梯升/降檔，超標模擬修剪不重設計時。
     bull_accel_on_data_bar = False
 
@@ -670,12 +682,14 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         step_before_bar = step_idx
         last_step_before_bar = last_action_idx
         bull_accel_on_data_bar = False
+        was_v_rebound = v_rebound_history[-1] if v_rebound_history else False
         current_close = df['Close'].iloc[i]
         sma_fast = df['SMA_fast'].iloc[i]
         sma_slow = df['SMA_slow'].iloc[i]
         high_bw  = df['High_bw'].iloc[i]
         low_bw   = df['Low_bw'].iloc[i]
         sma_bear = df['SMA_bear'].iloc[i] if 'SMA_bear' in df.columns else np.nan
+        low_v    = df['Low_v'].iloc[i] if 'Low_v' in df.columns else np.nan
 
         if current_close < sma_slow:
             below_ma_counter += 1
@@ -696,7 +710,8 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 accel_left = bull_acceleration.get('accel_days', 252)
             bear_counter = 0
 
-        # 3. 若處於防禦狀態 (not in_trend)，統一判定 C1 深熊減半、C1-A2 季線復原與 E3b 季線右側總攻
+        # 3. 若處於防禦狀態 (not in_trend)，統一判定 C1 深熊減半、C1-A2 季線復原、E3b 季線右側總攻與 V 轉先鋒
+        v_rebound_holding = False
         if not in_trend:
             bear_counter += 1
             ext_guard_active = False
@@ -706,6 +721,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 cur_b = deep_bear_guard.get('deep_base', base_leverage)
                 is_deep = True
                 pre_bull_on = False
+                v_rebound_on = False
             elif pre_bull_boost is not None and not pd.isna(sma_bear):
                 if current_close >= sma_bear and sma_fast >= sma_bear:
                     if current_close > high_bw:
@@ -714,7 +730,16 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                     pre_bull_on = False
                 if pre_bull_on:
                     cur_b = pre_bull_boost
+            if v_rebound_boost and not is_deep and not pd.isna(low_v) and low_v > 0:
+                if not v_rebound_on and (current_close / low_v - 1.0) >= v_thresh:
+                    v_rebound_on = True
+                elif v_rebound_on and current_close < low_bw:
+                    v_rebound_on = False
             target = cur_b
+            if v_rebound_on:
+                if target < v_lev:
+                    target = v_lev
+                    v_rebound_holding = True
         else:
             # 4. 以下為 in_trend == True (多頭進攻狀態)，deep_bear 與 pre_bull 強制為 False
             is_deep = False
@@ -738,6 +763,16 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
             alloc_pct = allocs[step_idx]
             target = cur_base * (1 - alloc_pct) + max_leverage * alloc_pct
+
+            # V 轉先鋒無縫交棒：若站上 220MA 但主階梯尚 < 2.0x，保底續抱至交棒或跌破 low_bw 止損
+            if v_rebound_on:
+                if current_close < low_bw:
+                    v_rebound_on = False
+                elif target >= v_lev:
+                    v_rebound_on = False
+                else:
+                    target = v_lev
+                    v_rebound_holding = True
 
             # === 乖離過熱冷卻器 (Extension Guard) ===
             ext_guard_active = False
@@ -772,6 +807,10 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
             if not in_trend:
                 if is_deep and target < prev_t:
                     act_label = "C1深熊減半"
+                elif v_rebound_holding and target > prev_t:
+                    act_label = "V轉先鋒啟動"
+                elif was_v_rebound and target < prev_t:
+                    act_label = "V轉先鋒止損"
                 elif pre_bull_on and target > prev_t:
                     act_label = "E3b季線總攻"
                 elif target > prev_t:
@@ -779,7 +818,11 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
                 else:
                     act_label = "破年線退底倉"
             else:
-                if target > prev_t:
+                if ext_guard_active and target < prev_t:
+                    act_label = "過熱鎖利壓回"
+                elif was_v_rebound and target < prev_t:
+                    act_label = "V轉先鋒止損"
+                elif target > prev_t:
                     act_label = "突破加碼" if not (prev_t <= 1.2 and step_idx == 0) else "站上年線重啟"
                 elif ext_guard_active:
                     act_label = "過熱鎖利壓回"
@@ -836,6 +879,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         target_history.append(target)
         deep_bear_history.append(is_deep)
         pre_bull_history.append(pre_bull_on)
+        v_rebound_history.append(v_rebound_holding)
 
     total_bars = len(df)
     if last_action_event:
@@ -861,6 +905,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     lev_changed = curr_target != prev_target
     deep_bear_active = deep_bear_history[-1] if deep_bear_history else False
     pre_bull_active = pre_bull_history[-1] if pre_bull_history else False
+    v_rebound_active = v_rebound_history[-1] if v_rebound_history else False
 
     # 狀態輸出只觀測既有決策；不改 target、last_action_idx、accel_left 或 sim_L。
     latest_date_str = latest.name.strftime('%Y-%m-%d')
@@ -873,6 +918,10 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     raw_fast = float(latest['SMA_fast'])
     raw_slow = float(latest['SMA_slow'])
     raw_bear = float(latest['SMA_bear']) if 'SMA_bear' in latest else None
+    raw_low_v = float(latest['Low_v']) if 'Low_v' in latest and not pd.isna(latest['Low_v']) else None
+    v_low_val = round(raw_low_v, 2) if (raw_low_v is not None and raw_low_v > 0) else None
+    v_trigger_price = round(raw_low_v * (1.0 + v_thresh), 2) if (v_rebound_boost and raw_low_v is not None and raw_low_v > 0) else None
+    v_rally_pct = round(((raw_close / raw_low_v) - 1.0) * 100.0, 1) if (v_rebound_boost and raw_low_v is not None and raw_low_v > 0) else None
     ext_ratio_raw = raw_close / raw_slow if raw_slow > 0 else 0.0
     ext_ratio_now = round(ext_ratio_raw, 4)
     ext_pct_now = round((ext_ratio_raw - 1) * 100, 1)
@@ -882,7 +931,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     d1_blocked = bool(in_trend and d1_enabled and raw_bear is not None and raw_fast < raw_bear)
     extension_above = bool(in_trend and extension_guard and ext_ratio_raw > extension_guard['threshold'])
     grace_active = bool(in_trend and raw_close < raw_slow and below_ma_counter <= grace_days)
-    recovered = bool(not in_trend and not deep_bear_active and not pre_bull_active and raw_bear is not None
+    recovered = bool(not in_trend and not deep_bear_active and not pre_bull_active and not v_rebound_active and raw_bear is not None
                      and (raw_fast >= raw_bear or (len(deep_bear_history) > 1 and deep_bear_history[-2])))
 
     elapsed = int((len(df) - 1) - last_action_idx) if last_step_event is not None else None
@@ -936,6 +985,10 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
 
     if deep_bear_active:
         stage, stage_label = 'defense_deep', 'C1深熊防禦'
+    elif v_rebound_active and not in_trend:
+        stage, stage_label = 'v_rebound', 'V轉先鋒(年線下)'
+    elif v_rebound_active and in_trend and not ext_guard_active:
+        stage, stage_label = 'v_rebound_handoff', 'V轉先鋒(待交棒)'
     elif pre_bull_active:
         stage, stage_label = 'e3b', 'E3b年線下季線總攻'
     elif recovered:
@@ -956,7 +1009,20 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         ('cooldown', cooldown_active), ('grace', grace_active), ('d1_filter', d1_blocked),
         ('extension', ext_guard_active), ('extension_threshold', extension_above),
         ('bull_accel', bull_accel_active), ('full', bool(in_trend and step_idx == max_idx)),
-        ('c1_recovered', recovered)) if active]
+        ('c1_recovered', recovered), ('v_rebound', bool(v_rebound_active and not ext_guard_active))) if active]
+    v_rebound_state = (
+        {
+            'enabled': True,
+            'active': bool(v_rebound_active and not ext_guard_active),
+            'win': v_win,
+            'thresh_pct': round(v_thresh * 100.0, 1),
+            'lev': v_lev,
+            'low_val': v_low_val,
+            'trigger_price': v_trigger_price,
+            'rally_pct': v_rally_pct,
+        }
+        if v_rebound_boost else {'enabled': False, 'active': False}
+    )
     state_label = stage_label
     if cooldown_active:
         direction = '減碼' if last_step_event['kind'] == 'step_down' else '加碼'
@@ -977,6 +1043,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'extension': {'threshold_exceeded': extension_above, 'capping_active': bool(ext_guard_active),
                       'cap': float(ext_cap_val) if extension_guard else None},
         'd1': {'enabled': d1_enabled, 'blocked': d1_blocked},
+        'v_rebound': v_rebound_state,
         'signal_change_on_data_bar': bool(lev_changed),
         'excess_trim_on_data_bar': bool(not lev_changed and last_excess_trim_event is not None
                                       and last_excess_trim_event['date'] == latest_date_str
@@ -996,10 +1063,17 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
     if not in_trend:
         if deep_bear_active:
             notes.append(f'季線低於年線{deep_bear_guard.get("ratio", .97):.2f}倍且快線低於季線，採深熊底倉。')
+        elif v_rebound_active:
+            notes.append(f'V轉先鋒啟動（近{v_win}日低點反彈達+{v_thresh*100:.0f}%，保底{v_lev:.1f}x；'
+                         f'跌破{w_dn}日低點{l_bw:.2f}或落入C1深熊即退回底倉）。')
         elif pre_bull_active:
             notes.append(f'年線下季線總攻已啟動；維持須收盤與快線守住{bear_w}MA且未觸發深熊。')
         else:
             notes.append('依已驗收防禦條件採常態底倉，未符合季線總攻啟動條件。')
+        if not deep_bear_active and not v_rebound_active and v_trigger_price is not None:
+            notes.append(f'V轉先鋒待命門檻：收盤 ≥ {v_trigger_price:.2f}（{v_win}日低 {v_low_val:.2f} +{v_thresh*100:.0f}%，現 {v_rally_pct:+.1f}%）。')
+    elif v_rebound_active and not ext_guard_active:
+        notes.append(f'V轉先鋒待交棒（收復年線後保底{v_lev:.1f}x續抱，跌破{w_dn}日低點{l_bw:.2f}止損；主階梯升達≥{v_lev:.1f}x即無縫交棒）。')
     if d1_blocked:
         notes.append(f'D1：{fast_ma}MA低於{bear_w}MA，階梯升檔另被濾網阻擋；階梯降檔仍須通道與冷卻條件。')
     if extension_above:
@@ -1060,6 +1134,11 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'bull_accel_days_left': bull_accel_days_left,
         'deep_bear_active': deep_bear_active,
         'pre_bull_active': pre_bull_active,
+        'v_rebound_active': bool(v_rebound_active and not ext_guard_active),
+        'v_rebound_lev': float(v_lev) if v_rebound_boost else None,
+        'v_rebound_trigger_price': v_trigger_price,
+        'v_rebound_low_val': v_low_val,
+        'v_rebound_rally_pct': v_rally_pct,
         'sma_bear_val': sma_bear_val,
         'deep_bear_ratio': deep_bear_guard.get('ratio', 0.97) if deep_bear_guard else None,
         'last_action': last_action_event,
@@ -1109,7 +1188,8 @@ def refresh_cache():
                 extension_guard={'threshold': 1.16, 'cap': 1.8},
                 deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True},
                 add_above_bear=True,
-                pre_bull_boost=1.0
+                pre_bull_boost=1.0,
+                v_rebound_boost={'win': 20, 'thresh': 0.15, 'lev': 2.0}
             )
         except Exception as e:
             print(f"⚠️ QQQ 訊號計算異常: {e}")
@@ -1137,7 +1217,8 @@ def refresh_cache():
                 bull_acceleration={'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40},
                 deep_bear_guard={'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.5},
                 add_above_bear=False,
-                pre_bull_boost=1.2
+                pre_bull_boost=1.2,
+                v_rebound_boost={'win': 20, 'thresh': 0.15, 'lev': 2.0}
             )
         except Exception as e:
             print(f"⚠️ 006208.TW 訊號計算異常: {e}")

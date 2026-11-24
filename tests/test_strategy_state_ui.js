@@ -257,6 +257,39 @@ const event = (kind, date = '2026-11-05') => ({date, days_ago: 0, from_lev: 3, t
     assert.match(text(twG0, 1, '.low-bw-val'), /當日破線轉防禦/);
     assert.doesNotMatch(text(twG0, 1, '.low-bw-val'), /連 2 日/);
     cases.push('tw_grace_zero_shows_same_day_exit_rule');
+
+    const vReboundBelow = await render([market('QQQ', {
+        in_trend: false, step_idx: 0, close: 185, target_today: 2.0, target_yesterday: 0.8, low_bw: 160,
+        v_rebound_active: true, v_rebound_lev: 2.0,
+        strategy_state: state({stage: 'v_rebound', label: 'V轉先鋒(年線下)', flags: ['v_rebound'],
+            v_rebound: {enabled: true, active: true, win: 20, thresh_pct: 15.0, lev: 2.0, low_val: 160, trigger_price: 184, rally_pct: 15.6}})
+    }), market('006208.TW')]);
+    assert.match(text(vReboundBelow, 0, '.status-badge'), /🚀 V轉先鋒 \(2\.0x\)/);
+    assert.match(text(vReboundBelow, 0, '.low-bw-val'), /V轉先鋒止損.*160\.00/);
+    assert.match(text(vReboundBelow, 0, '.strategy-explanation'), /保底 2\.0x/);
+    cases.push('v_rebound_below_annual_shows_badge_and_stop_threshold');
+
+    const vReboundHandoff = await render([market('QQQ'), market('006208.TW', {
+        in_trend: true, step_idx: 0, close: 199, target_today: 2.0, target_yesterday: 2.0, high_bw: 200, low_bw: 160,
+        v_rebound_active: true, v_rebound_lev: 2.0,
+        strategy_state: state({stage: 'v_rebound_handoff', label: 'V轉先鋒(待交棒)', flags: ['v_rebound'],
+            v_rebound: {enabled: true, active: true, win: 20, thresh_pct: 15.0, lev: 2.0, low_val: 160, trigger_price: 184, rally_pct: 24.4}})
+    })]);
+    assert.match(text(vReboundHandoff, 1, '.status-badge'), /🚀 V轉先鋒 · 待交棒 \(2\.0x\)/);
+    assert.match(text(vReboundHandoff, 1, '.high-bw-val'), /保底 2\.0x 待階梯升檔.*200\.00 無縫交棒/);
+    cases.push('v_rebound_handoff_above_annual_shows_handoff_status');
+
+    const defenseStandby = await render([market('QQQ', {
+        in_trend: false, step_idx: 0, close: 649.5, target_today: 0.8, target_yesterday: 0.8,
+        v_rebound_active: false, v_rebound_lev: 2.0, v_rebound_trigger_price: 699.72, v_rebound_low_val: 608.45, v_rebound_rally_pct: 6.7,
+        strategy_state: state({stage: 'defense', label: '常態防禦底倉',
+            v_rebound: {enabled: true, active: false, win: 20, thresh_pct: 15.0, lev: 2.0, low_val: 608.45, trigger_price: 699.72, rally_pct: 6.7}})
+    }), market('006208.TW', {
+        strategy_state: state({v_rebound: {enabled: true, active: false, win: 20, thresh_pct: 15.0, lev: 2.0, low_val: 90, trigger_price: 103.5, rally_pct: 11.1}})
+    })]);
+    assert.match(text(defenseStandby, 0, '.strategy-explanation'), /V轉先鋒線 ≥ 699\.72/);
+    assert.doesNotMatch(text(defenseStandby, 1, '.strategy-explanation'), /V轉先鋒/);
+    cases.push('defense_standby_shows_v_rebound_trigger_and_normal_bull_stays_clean');
     console.log(JSON.stringify({passed: true, cases, samples: {
         stale_top: stale.global.textContent,
         stale_delta: text(stale, 1, '.delta-badge'),
