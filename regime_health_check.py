@@ -90,7 +90,7 @@ def _drop_incomplete_eod_bar(s, ticker, now_dt=None):
     """剔除尚未收盤之當日盤中報價或未來日期異常 K 棒，確保只用已完成 EOD 收盤價。"""
     if len(s) == 0:
         return s
-    is_tw = ticker.endswith('.TW') or ticker == '^TWII'
+    is_tw = ticker == 'IR0001' or ticker.endswith('.TW') or ticker == '^TWII'
     if is_tw:
         local_now = now_dt if now_dt is not None else datetime.now(TZ_TAIPEI)
         cutoff_hm = '13:35'
@@ -106,10 +106,29 @@ def _drop_incomplete_eod_bar(s, ticker, now_dt=None):
 
 
 def fetch_close_series(ticker, period='10y', allow_zero=False, min_rows=260):
-    """兩層唯讀日線抓價：yfinance 主抓，失敗或筆數不足則退回 Yahoo Direct Chart API。"""
+    """多層唯讀日線抓價：IR0001 走官方四層報酬指數管線；其餘走 yfinance 主抓＋Yahoo Direct Chart 備援。"""
     import numpy as np
     import pandas as pd
     import yfinance as yf
+
+    if ticker == 'IR0001':
+        from tw_ir0001_source import fetch_tw_ir0001_data
+        now_tw = datetime.now(TZ_TAIPEI)
+        years = int(period[:-1]) if str(period).endswith('y') and str(period)[:-1].isdigit() else 10
+        df = fetch_tw_ir0001_data(
+            expected_session=now_tw.date(),
+            is_tw_holiday_fn=lambda d: d.weekday() >= 5,
+            years=years,
+            ssl_context=_ssl_context(),
+            now_tw=now_tw,
+            min_rows=min_rows,
+        )
+        if df is None or df.empty or 'Close' not in df.columns:
+            raise RuntimeError(f'Failed to fetch {ticker}: IR0001 source returned empty or insufficient rows')
+        s = _drop_incomplete_eod_bar(_clean_close_series(df['Close'], allow_zero=allow_zero), ticker, now_dt=now_tw)
+        if len(s) >= min_rows:
+            return s
+        raise RuntimeError(f'{ticker}: IR0001 returned only {len(s)} valid rows (< {min_rows})')
 
     last_err = None
     try:
@@ -653,9 +672,9 @@ def evaluate_all(us_close, tw_close, irx_pct_s, tsmc_info, as_of_date=None):
         as_of_date = datetime.now(TZ_TAIPEI).date()
 
     alarm4_us = evaluate_alarm4_volatility(us_close, '美股 QQQ')
-    alarm4_tw = evaluate_alarm4_volatility(tw_close, '台股 006208')
+    alarm4_tw = evaluate_alarm4_volatility(tw_close, '台股 IR0001')
     alarm2_us = evaluate_alarm2_whipsaw(us_close, US_P['f'], US_P['s'], 10, '美股 QQQ')
-    alarm2_tw = evaluate_alarm2_whipsaw(tw_close, TW_P['f'], TW_P['s'], 6, '台股 006208')
+    alarm2_tw = evaluate_alarm2_whipsaw(tw_close, TW_P['f'], TW_P['s'], 6, '台股 IR0001')
     alarm3 = evaluate_alarm3_us_rates(irx_pct_s, us_close)
     layer4 = evaluate_layer4_redlines(us_close, tw_close, irx_pct_s)
     tsmc = evaluate_tsmc_weight(tsmc_info)
@@ -919,7 +938,7 @@ def run_health_check(mode='auto', as_of_str=None, json_out=None):
 
     print(f'🩺 開始執行體制健康檢查 (mode={mode}, as_of={as_of_date.isoformat()})...')
     us_close = fetch_close_series('QQQ', period='10y', allow_zero=False)
-    tw_close = fetch_close_series('006208.TW', period='10y', allow_zero=False)
+    tw_close = fetch_close_series('IR0001', period='10y', allow_zero=False)
     irx_pct_s = fetch_close_series('^IRX', period='10y', allow_zero=True)
     tsmc_info = fetch_tsmc_weight()
 

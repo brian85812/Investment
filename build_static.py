@@ -70,7 +70,7 @@ def _market_events(signal):
 
 def _freshness_issues(signal):
     """Keep stale dates, missing markets (validator), and cached fallback distinct."""
-    label = {'QQQ': '美股', '006208.TW': '台股'}.get(signal.get('ticker'), signal.get('ticker', '市場'))
+    label = {'QQQ': '美股', 'IR0001': '台股', '006208.TW': '台股'}.get(signal.get('ticker'), signal.get('ticker', '市場'))
     status = str(signal.get('data_status') or '')
     date, expected = signal.get('date'), signal.get('expected_session')
     dated_lag = isinstance(date, str) and isinstance(expected, str) and date < expected
@@ -260,7 +260,7 @@ def format_push_summary(signals, rollover, pending_events):
         header = '✅ <b>本次維持，無新增調倉</b>'
     lines = [header]
     for signal in signals:
-        label = {'QQQ': '美股', '006208.TW': '台股'}.get(signal['ticker'], signal['ticker'])
+        label = {'QQQ': '美股', 'IR0001': '台股', '006208.TW': '台股'}.get(signal['ticker'], signal['ticker'])
         prefix = f"• {escape(label)} {signal['date'][5:].replace('-', '/')}："
         issues = _freshness_issues(signal)
         if issues:
@@ -363,10 +363,10 @@ def validate_signals_payload(signals):
     from datetime import datetime as _dt
     errors = []
     if not isinstance(signals, list) or len(signals) != 2:
-        errors.append(f"Expected 2 market signals (QQQ and 006208.TW), got {0 if not isinstance(signals, list) else len(signals)}")
+        errors.append(f"Expected 2 market signals (QQQ and IR0001), got {0 if not isinstance(signals, list) else len(signals)}")
         return False, errors
 
-    expected_tickers = {'QQQ', '006208.TW'}
+    expected_tickers = {'QQQ', 'IR0001'}
     actual_tickers = {s.get('ticker') for s in signals if isinstance(s, dict)}
     if actual_tickers != expected_tickers:
         errors.append(f"Missing required tickers: expected {expected_tickers}, got {actual_tickers}")
@@ -442,7 +442,7 @@ def build(notify=True):
     )
     
     tw = compute_signal(
-        name="台股 006208", ticker="006208.TW",
+        name="台股 IR0001", ticker="IR0001",
         base_leverage=1.0, max_leverage=3.0,
         fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25, cooldown=10,
         allocs=[0.0, 0.50, 0.75, 0.90, 1.0],

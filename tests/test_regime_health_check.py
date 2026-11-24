@@ -116,6 +116,8 @@ class AlarmTests(unittest.TestCase):
         after_close_tw = datetime(2026, 11, 23, 13, 35, tzinfo=ZoneInfo('Asia/Taipei'))
         self.assertEqual(str(rhc._drop_incomplete_eod_bar(tw_s, '006208.TW', before_close_tw).index[-1].date()), '2026-11-20')
         self.assertEqual(str(rhc._drop_incomplete_eod_bar(tw_s, '006208.TW', after_close_tw).index[-1].date()), '2026-11-23')
+        self.assertEqual(str(rhc._drop_incomplete_eod_bar(tw_s, 'IR0001', before_close_tw).index[-1].date()), '2026-11-20')
+        self.assertEqual(str(rhc._drop_incomplete_eod_bar(tw_s, 'IR0001', after_close_tw).index[-1].date()), '2026-11-23')
 
         us_before = datetime(2026, 11, 23, 14, 0, tzinfo=ZoneInfo('America/New_York'))
         us_after = datetime(2026, 11, 23, 16, 1, tzinfo=ZoneInfo('America/New_York'))
@@ -355,6 +357,15 @@ class TsmcAndNotificationTests(unittest.TestCase):
             saved = json.loads(out_json.read_text(encoding='utf-8'))
             self.assertEqual(saved['overall_status'], report['overall_status'])
             self.assertEqual(saved['notify'], {'should_send': False, 'reason': 'dry_run'})
+
+    def test_fetch_close_series_routes_ir0001_to_official_source(self):
+        import tw_ir0001_source
+        fake_s = _make_steady_bull(n_days=270, daily_ret=0.0005)
+        fake_df = pd.DataFrame({'Close': fake_s})
+        with mock.patch.object(tw_ir0001_source, 'fetch_tw_ir0001_data', return_value=fake_df) as m_ir:
+            got = rhc.fetch_close_series('IR0001', period='10y', min_rows=260)
+        m_ir.assert_called_once()
+        self.assertGreaterEqual(len(got), 260)
 
     def test_ci_failure_alert_escaping_retries_and_missing_secret(self):
         html = rhc.format_ci_failure_html({

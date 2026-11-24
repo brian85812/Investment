@@ -9,7 +9,7 @@ import pandas as pd
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / 'app.py'
-TW_PARAMS = dict(name='台股', ticker='006208.TW', base_leverage=1.0, max_leverage=3.0,
+TW_PARAMS = dict(name='台股', ticker='IR0001', base_leverage=1.0, max_leverage=3.0,
                  fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25,
                  cooldown=10, allocs=[0., .50, .75, .90, 1.], grace_days=0,
                  bull_acceleration=dict(enable=True, accel_base=1.2, accel_days=252, min_bear_days=40),

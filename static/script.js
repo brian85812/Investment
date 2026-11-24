@@ -29,7 +29,8 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    const marketLabel = ticker => ticker === 'QQQ' ? '美股' : ticker === '006208.TW' ? '台股' : ticker;
+    const isTwTicker = ticker => ticker === 'IR0001' || ticker === '006208.TW';
+    const marketLabel = ticker => ticker === 'QQQ' ? '美股' : isTwTicker(ticker) ? '台股' : ticker;
     const shortDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') ? value.slice(5).replace('-', '/') : (value || '未知');
 
     function getFreshness(market) {
@@ -424,19 +425,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 const seenTickers = new Set(validMarkets.map(m => m.ticker));
-                const hasBothRequired = seenTickers.has('QQQ') && seenTickers.has('006208.TW') && validMarkets.length === 2;
+                const hasTw = validMarkets.some(m => isTwTicker(m.ticker));
+                const hasBothRequired = seenTickers.has('QQQ') && hasTw && validMarkets.length === 2;
 
                 const changedNames = [];
                 const trimNames = [];
-                const dataIssues = ['QQQ', '006208.TW'].filter(ticker => !seenTickers.has(ticker))
-                    .map(ticker => `${marketLabel(ticker)}市場資料缺失`);
+                const dataIssues = [];
+                if (!seenTickers.has('QQQ')) dataIssues.push('美股市場資料缺失');
+                if (!hasTw) dataIssues.push('台股市場資料缺失');
                 if (!hasBothRequired && dataIssues.length === 0) dataIssues.push('市場資料結構異常（重複或額外市場）');
                 const marketDates = [];
                 const activeRestrictions = [];
 
                 validMarkets.forEach(market => {
                     if (market.date) {
-                        const shortLabel = market.ticker === 'QQQ' ? 'US' : (market.ticker === '006208.TW' ? 'TW' : market.ticker);
+                        const shortLabel = market.ticker === 'QQQ' ? 'US' : (isTwTicker(market.ticker) ? 'TW' : market.ticker);
                         marketDates.push({ label: shortLabel, ticker: market.ticker, date: market.date });
                     }
                     const freshness = getFreshness(market);
@@ -539,7 +542,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     // 核心三指標
                     clone.querySelector('.price').textContent = market.close.toFixed(2);
                     const biasPct = ((market.close / market.sma_slow_val - 1) * 100).toFixed(1);
-                    clone.querySelector('.ma-dist-text').textContent = `年線 ${market.sma_slow_val.toFixed(1)} (${biasPct >= 0 ? '+' : ''}${biasPct}%)`;
+                    const spotNote = (market.spot_ref && Number.isFinite(Number(market.spot_ref.close)))
+                        ? ` · ${market.spot_ref.label || '加權'} ${Math.round(Number(market.spot_ref.close)).toLocaleString()}`
+                        : '';
+                    clone.querySelector('.ma-dist-text').textContent = `年線 ${market.sma_slow_val.toFixed(1)} (${biasPct >= 0 ? '+' : ''}${biasPct}%)${spotNote}`;
 
                     clone.querySelector('.target-lev').textContent = `${market.target_today.toFixed(2)}x`;
                     const trimLine = market.trim_trigger_lev || (market.target_today + 0.15);
@@ -875,6 +881,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     dcaInput.addEventListener('input', () => evaluateInputs(false));
                     if (calcDrawer) calcDrawer.addEventListener('toggle', () => syncSessionFormState());
 
+                    const readSavedCalc = () => {
+                        const raw = localStorage.getItem(storageKey)
+                            || (market.id === 'ir0001' ? localStorage.getItem('moat_calc_006208_tw') : null);
+                        return JSON.parse(raw || 'null');
+                    };
                     const sessionSaved = sessionFormState.get(market.id);
                     if (sessionSaved && (sessionSaved.equity !== '' || sessionSaved.position !== '' || sessionSaved.dca !== '')) {
                         equityInput.value = sessionSaved.equity || '';
@@ -882,7 +893,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (dcaInput) dcaInput.value = sessionSaved.dca || '';
                         if (calcDrawer && sessionSaved.open) calcDrawer.open = true;
                         try {
-                            const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+                            const saved = readSavedCalc();
                             if (saved && savedMetaNote && saved.savedAt) {
                                 const staleSaved = saved.marketDate && market.date && saved.marketDate !== market.date;
                                 savedMetaNote.textContent = `💾 實帳記憶: ${saved.savedAt}${staleSaved ? ' ⚠️ (跨日舊部位，請更新收盤淨值)' : ''}`;
@@ -891,7 +902,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         evaluateInputs(false);
                     } else {
                         try {
-                            const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+                            const saved = readSavedCalc();
                             if (saved && saved.equity !== undefined && saved.equity !== '' && saved.position !== undefined && saved.position !== '') {
                                 equityInput.value = saved.equity;
                                 positionInput.value = saved.position;

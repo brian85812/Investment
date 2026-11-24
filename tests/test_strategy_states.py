@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 APP_PATH = Path(__file__).resolve().parents[1] / 'app.py'
-TW = dict(name='台股', ticker='006208.TW', base_leverage=1., max_leverage=3.,
+TW = dict(name='台股', ticker='IR0001', base_leverage=1., max_leverage=3.,
           fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25,
           cooldown=10, allocs=[0., .5, .75, .9, 1.], grace_days=0,
           bull_acceleration=dict(enable=True, min_bear_days=40, accel_base=1.2, accel_days=252),
@@ -129,7 +129,7 @@ class StrategyStateTests(unittest.TestCase):
             calls = [
                 node for node in ast.walk(tree)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'compute_signal'
-                and any(kw.arg == 'ticker' and ast.literal_eval(kw.value) == '006208.TW' for kw in node.keywords)
+                and any(kw.arg == 'ticker' and ast.literal_eval(kw.value) == 'IR0001' for kw in node.keywords)
             ]
             self.assertEqual(len(calls), 1, rel_path)
             grace_kw = next(kw for kw in calls[0].keywords if kw.arg == 'grace_days')
@@ -260,7 +260,7 @@ class StrategyStateTests(unittest.TestCase):
             calls = [
                 node for node in ast.walk(tree)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'compute_signal'
-                and any(kw.arg == 'ticker' and ast.literal_eval(kw.value) in ('QQQ', '006208.TW') for kw in node.keywords)
+                and any(kw.arg == 'ticker' and ast.literal_eval(kw.value) in ('QQQ', 'IR0001') for kw in node.keywords)
             ]
             self.assertEqual(len(calls), 2, rel_path)
             for call in calls:

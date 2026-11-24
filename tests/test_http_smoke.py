@@ -53,7 +53,7 @@ class DashboardSmokeTests(TestCase):
         signals = [dict(ticker=ticker, date='2026-11-04', is_stale=False, data_status='ok',
                         target_today=target, target_yesterday=target,
                         last_signal_change=None, last_excess_trim=None)
-                   for ticker, target in [('QQQ', 0.8), ('006208.TW', 2.8)]]
+                   for ticker, target in [('QQQ', 0.8), ('IR0001', 2.8)]]
         dashboard._cache.update(data=signals, degraded=False, last_updated=FixedClock.now(),
                                 last_success_at=FixedClock.now())
         response = self.client.get('/api/data')

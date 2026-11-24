@@ -61,31 +61,31 @@ const text = (r, i, selector) => r.cards[i].querySelector(selector).textContent;
     assert.doesNotMatch(legacy.global, /變動|修剪/);
 
     const signal = {...evt('跌破通道減碼', 3, 2.8, 5), date: '2026-10-28'};
-    const split = await render([market('QQQ'), market('006208.TW', {
+    const split = await render([market('QQQ'), market('IR0001', {
         last_signal_change: signal, last_excess_trim: trim, last_action: trim, last_trim: trim
     })]);
     assert.match(text(split, 1, '.last-action-val'), /10\/28/);
     assert.doesNotMatch(text(split, 1, '.last-action-val'), /3\.04/);
     assert.match(text(split, 1, '.last-trim-val'), /11\/03/);
 
-    const explicitNull = await render([market('QQQ'), market('006208.TW', {
+    const explicitNull = await render([market('QQQ'), market('IR0001', {
         last_signal_change: null, last_excess_trim: null, last_action: trim, last_trim: trim
     })]);
     assert.equal(text(explicitNull, 1, '.last-action-val'), '尚無獨立紀錄');
     assert.equal(text(explicitNull, 1, '.last-trim-val'), '尚無獨立紀錄');
 
     const currentTrim = evt('+0.15x超標修剪', 3.04, 2.8, 0);
-    const now = await render([market('QQQ'), market('006208.TW', {last_signal_change: signal, last_excess_trim: currentTrim})]);
+    const now = await render([market('QQQ'), market('IR0001', {last_signal_change: signal, last_excess_trim: currentTrim})]);
     assert.match(text(now, 1, '.delta-badge'), /本期模擬修剪（超標/);
     assert.match(now.global, /模擬超標修剪/);
 
-    const precision = await render([market('QQQ'), market('006208.TW', {target_today: 2.8000000000000003, target_yesterday: 2.8})]);
+    const precision = await render([market('QQQ'), market('IR0001', {target_today: 2.8000000000000003, target_yesterday: 2.8})]);
     assert.equal(text(precision, 1, '.delta-badge'), '維持 2.80x');
     assert.doesNotMatch(precision.global, /變動|修剪/);
 
     // Bugfixes #1 & #2: position=0 空手試算 與 降檔+DCA 不得自相矛盾
     const stepDownDca = await render([market('QQQ', {target_today: 0.8, target_yesterday: 0.8}),
-        market('006208.TW', {target_today: 2.8, target_yesterday: 3.0})]);
+        market('IR0001', {target_today: 2.8, target_yesterday: 3.0})]);
     const twCard = stepDownDca.cards[1];
     twCard.querySelector('.equity-input').value = '1000000';
     twCard.querySelector('.position-input').value = '0';
@@ -100,7 +100,7 @@ const text = (r, i, selector) => r.cards[i].querySelector(selector).textContent;
     assert.doesNotMatch(twCard.querySelector('.action-instruction').innerHTML, /免動作/);
 
     const template = fs.readFileSync(path.resolve(__dirname, '..', 'templates', 'index.html'), 'utf8');
-    assert.match(template, /美股 QQQ 70% · 台股 006208 30% · ±10%/);
+    assert.match(template, /美股 QQQ 70% · 台股 IR0001 30% · ±10%/);
     assert.match(template, /最近目標變更/); assert.match(template, /最近模擬超標修剪/); assert.match(template, /非實帳/);
     console.log(JSON.stringify({passed: true, cases: ['legacy_public_snapshot_shape', 'split_history', 'explicit_null_no_fallback', 'current_excess_trim', 'unchanged_rounded_2_8', 'zero_position_and_stepdown_dca_fixes', 'template_labels']}));
 })().catch(error => { console.error(error); process.exitCode = 1; });

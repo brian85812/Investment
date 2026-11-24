@@ -53,7 +53,7 @@ class NotificationTests(unittest.TestCase):
         (self.root / 'static').mkdir()
         (self.root / 'templates').mkdir()
         (self.root / 'templates/index.html').write_text('<html></html>', encoding='utf-8')
-        self.signals = [market('QQQ'), market('006208.TW')]
+        self.signals = [market('QQQ'), market('IR0001')]
         self.rollover = {'tw': {'days_left': 20}, 'us': {'days_left': 20}}
         self.path = self.root / 'dist/.last_notified_event.json'
         self.path.parent.mkdir()
@@ -121,7 +121,7 @@ class NotificationTests(unittest.TestCase):
         self.assertFalse(self.payloads[-1]['disable_notification'])
         self.assertIn('（本次新訊號）', self.payloads[-1]['text'])
         state = json.loads(self.path.read_text(encoding='utf-8'))
-        self.assertEqual(len(state['markets']['006208.TW']['signal_change']), 2)
+        self.assertEqual(len(state['markets']['IR0001']['signal_change']), 2)
 
     def test_fresh_excess_trim_with_unchanged_target_alerts(self):
         self.send()
@@ -187,7 +187,7 @@ class NotificationTests(unittest.TestCase):
         self.assertTrue(self.payloads[-1]['disable_notification'])
         state = json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(state['schema_version'], 2)
-        self.assertEqual(len(state['markets']['006208.TW']['signal_change']), 1)
+        self.assertEqual(len(state['markets']['IR0001']['signal_change']), 1)
 
     def test_legacy_trim_migrates_by_original_event_date(self):
         tw = self.signals[1]
@@ -257,7 +257,7 @@ class NotificationTests(unittest.TestCase):
         self.assertIn('台股 11/05', text)  # The affected market's data date stays explicit.
         self.assertNotIn('實帳 &gt;2.95x', text)  # No stale-market trim instruction.
         state = json.loads(self.path.read_text(encoding='utf-8'))
-        self.assertFalse(state['markets']['006208.TW'])
+        self.assertFalse(state['markets']['IR0001'])
 
     def test_current_date_fallback_is_not_called_delay_or_consumed(self):
         tw = self.tw_signal()
@@ -282,10 +282,16 @@ class NotificationTests(unittest.TestCase):
     def test_expected_date_alone_blocks_stale_direct_notification(self):
         tw = self.tw_signal()
         tw['expected_session'] = '2026-11-05'
-        pending = {'006208.TW': build._market_events(tw)}
+        pending = {'IR0001': build._market_events(tw)}
         build.send_push_notification(self.signals, self.rollover, pending_events=pending)
         self.assertIn('台股資料延遲：11/04，應11/05', self.payloads[-1]['text'])
         self.assertNotIn('（本次新訊號）', self.payloads[-1]['text'])
+
+    def test_old_006208_ticker_is_rejected_by_validator(self):
+        legacy_pair = [market('QQQ'), market('006208.TW')]
+        ok, errs = build.validate_signals_payload(legacy_pair)
+        self.assertFalse(ok)
+        self.assertTrue(any('IR0001' in e for e in errs))
 
     def test_compact_cooldown_is_shown_once_without_channel_repetition(self):
         self.signals[1]['strategy_state'] = {

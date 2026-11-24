@@ -40,6 +40,14 @@ _cache = {
 CACHE_TTL_MINUTES = 30
 MIN_REFRESH_COOLDOWN_SECONDS = 30
 
+TW_TICKER = 'IR0001'
+
+
+def is_tw_market_ticker(ticker):
+    t = str(ticker or '')
+    return t == TW_TICKER or t.endswith('.TW') or t == '^TWII'
+
+
 # ========================================================
 # 已知歷史資料缺失自動補齊庫 (Known Data Patches)
 # 解決 Yahoo Finance 偶發性漏掉特定交易日 K 棒的問題
@@ -446,10 +454,32 @@ def fetch_robust_market_data(ticker):
 
     MIN_REQUIRED_ROWS = 225
     REQUIRED_COLS = {'Open', 'High', 'Low', 'Close'}
-    is_tw_ticker = ticker.endswith('.TW')
+    is_tw_ticker = is_tw_market_ticker(ticker)
     expected_session = _expected_latest_session(is_tw_ticker)
     df = None
     source_layer = 'yfinance'
+
+    if ticker == TW_TICKER:
+        from tw_ir0001_source import fetch_tw_ir0001_data
+        df = fetch_tw_ir0001_data(
+            expected_session=expected_session,
+            is_tw_holiday_fn=_is_tw_holiday,
+            years=10,
+            ssl_context=ssl_ctx,
+            now_tw=datetime.now(TZ_TAIPEI),
+            min_rows=MIN_REQUIRED_ROWS,
+        )
+        if df is None or len(df) < MIN_REQUIRED_ROWS:
+            print(f"❌ {ticker} 官方報酬指數資料不足或連線異常 (rows={0 if df is None else len(df)} < {MIN_REQUIRED_ROWS})")
+            return None
+        spot_ref = df.attrs.get('spot_ref')
+        source_layer = df.attrs.get('source_layer', 'twse_ir0001')
+        df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+        return _finalize_market_df(
+            df, ticker, expected_session, is_tw_ticker, source_layer,
+            secondary_source=None, spot_ref=spot_ref, min_required_rows=MIN_REQUIRED_ROWS,
+        )
 
     # 第 1 層：標準 yfinance
     for attempt in range(2):
@@ -557,6 +587,71 @@ def fetch_robust_market_data(ticker):
             print(f"⚠️ fast_info 今日 K 棒補齊失敗 ({ticker}): {e}")
 
     # 針對最後一天即時報價 NaN 的容錯：若無法驗證為當日有效值則剔除該異常尾列
+    return _finalize_market_df(
+        df, ticker, expected_session, is_tw_ticker, source_layer,
+        secondary_source=secondary_source, spot_ref=None, min_required_rows=MIN_REQUIRED_ROWS,
+    )
+
+
+def _finalize_market_df(df, ticker, expected_session, is_tw_ticker, source_layer, secondary_source=None, spot_ref=None, min_required_rows=225):
+    def _is_tw_holiday(d):
+        if d.weekday() >= 5:
+            return True
+        if (d.month, d.day) in {(1, 1), (2, 28), (4, 4), (4, 5), (5, 1), (10, 10), (12, 25)}:
+            return True
+        known_tw_closures = {
+            '2025-01-23', '2025-01-24', '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
+            '2025-04-03', '2025-05-30', '2025-09-29', '2025-10-06', '2025-10-24',
+            '2026-02-12', '2026-02-13', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20',
+            '2026-02-27', '2026-04-03', '2026-04-06', '2026-06-19', '2026-09-25', '2026-09-28', '2026-10-09', '2026-10-26', '2026-12-25'
+        }
+        return d.strftime('%Y-%m-%d') in known_tw_closures
+
+    def _is_us_holiday(d):
+        if d.weekday() >= 5:
+            return True
+        d1 = date(d.year, 11, 1)
+        if d == d1 + timedelta(days=(3 - d1.weekday()) % 7) + timedelta(weeks=3):
+            return True
+        if d.month == 1 and d.weekday() == 0 and 15 <= d.day <= 21:
+            return True
+        if d.month == 2 and d.weekday() == 0 and 15 <= d.day <= 21:
+            return True
+        if d.month == 5 and d.weekday() == 0 and d.day >= 25:
+            return True
+        if d.month == 9 and d.weekday() == 0 and d.day <= 7:
+            return True
+        y = d.year
+        a, b, c = y % 19, y // 100, y % 100
+        dd, e = b // 4, b % 4
+        f = (b + 8) // 25
+        g = (b - f + 1) // 3
+        h = (19 * a + b - dd - g + 15) % 30
+        i, k = c // 4, c % 4
+        l = (32 + 2 * e + 2 * i - h - k) % 7
+        m_e = (a + 11 * h + 22 * l) // 451
+        easter_month = (h + l - 7 * m_e + 114) // 31
+        easter_day = ((h + l - 7 * m_e + 114) % 31) + 1
+        if d == date(y, easter_month, easter_day) - timedelta(days=2):
+            return True
+        for m_fixed, day_fixed in [(1, 1), (6, 19), (7, 4), (12, 25)]:
+            hol = date(d.year, m_fixed, day_fixed)
+            obs = hol - timedelta(days=1) if hol.weekday() == 5 else (hol + timedelta(days=1) if hol.weekday() == 6 else hol)
+            if d == obs:
+                return True
+        return False
+
+    def _get_us_close_hm(d):
+        d1 = date(d.year, 11, 1)
+        tg = d1 + timedelta(days=(3 - d1.weekday()) % 7) + timedelta(weeks=3)
+        if d == tg + timedelta(days=1):
+            return '13:05'
+        if d.month == 12 and d.day == 24 and not _is_us_holiday(d):
+            return '13:05'
+        if d.month == 7 and d.day == 3 and not _is_us_holiday(d) and date(d.year, 7, 4).weekday() < 5:
+            return '13:05'
+        return '16:05'
+
     if len(df) > 0 and pd.isna(df['Close'].iloc[-1]):
         df = df.iloc[:-1]
 
@@ -584,7 +679,7 @@ def fetch_robust_market_data(ticker):
     # 同時清理非有限值並附加上游新鮮度 metadata (F09/C8)
     df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=['Open', 'High', 'Low', 'Close'])
     df = df[(df['Close'] > 0) & (df['Open'] > 0) & (df['High'] > 0) & (df['Low'] > 0)]
-    if len(df) < MIN_REQUIRED_ROWS:
+    if len(df) < min_required_rows:
         return None
 
     last_bar_date = df.index[-1].date()
@@ -598,11 +693,13 @@ def fetch_robust_market_data(ticker):
     df.attrs['source_layer'] = source_layer
     if secondary_source is not None:
         df.attrs['secondary_source'] = secondary_source
+    if spot_ref is not None:
+        df.attrs['spot_ref'] = spot_ref
     return df
 
 def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, breakout_window, cooldown, allocs, grace_days=0, extension_guard=None, bull_acceleration=None, deep_bear_guard=None, add_above_bear=False, pre_bull_boost=None, breakout_up=None, breakout_dn=None, v_rebound_boost=None):
     """
-    grace_days: 跌破年線容忍天數（美股 QQQ 與台股 006208 皆統一為 0，即當日收盤破線即確認退出）
+    grace_days: 跌破年線容忍天數（美股 QQQ 與台股 IR0001 皆統一為 0，即當日收盤破線即確認退出）
     extension_guard: dict with {'threshold': 1.16, 'cap': 1.8} or None.
     bull_acceleration: dict with {'enable': True, 'accel_base': 1.2, 'accel_days': 252, 'min_bear_days': 40} or None.
     deep_bear_guard: dict with {'bear_ma': 60, 'ratio': 0.97, 'deep_base': 0.4, 'add_above_bear': True/False} or None.
@@ -1104,6 +1201,7 @@ def compute_signal(name, ticker, base_leverage, max_leverage, fast_ma, slow_ma, 
         'data_status': 'stale' if is_stale else 'ok',
         'source_layer': df_attrs.get('source_layer', 'yfinance'),
         'secondary_source': df_attrs.get('secondary_source'),
+        'spot_ref': df_attrs.get('spot_ref'),
         'close': cur_p,
         'in_trend': in_trend,
         'step_idx': step_idx,
@@ -1209,7 +1307,7 @@ def refresh_cache():
 
         try:
             tw = compute_signal(
-                name="台股 006208", ticker="006208.TW",
+                name="台股 IR0001", ticker="IR0001",
                 base_leverage=1.0, max_leverage=3.0,
                 fast_ma=8, slow_ma=220, breakout_window=15, breakout_up=15, breakout_dn=25, cooldown=10,
                 allocs=[0.0, 0.50, 0.75, 0.90, 1.0],
@@ -1221,16 +1319,16 @@ def refresh_cache():
                 v_rebound_boost={'win': 20, 'thresh': 0.15, 'lev': 2.0}
             )
         except Exception as e:
-            print(f"⚠️ 006208.TW 訊號計算異常: {e}")
+            print(f"⚠️ IR0001 訊號計算異常: {e}")
             tw = None
 
         if tw is not None:
             tw['fallback_used'] = False
             if not tw.get('is_stale', False) and tw.get('data_status', 'ok') == 'ok':
                 fresh_count += 1
-        elif '006208.TW' in old_data_map:
-            print("🛡️ [Layer 4] 006208 啟動離線快取保底，沿用前次有效訊號")
-            tw = old_data_map['006208.TW'].copy()
+        elif 'IR0001' in old_data_map:
+            print("🛡️ [Layer 4] IR0001 啟動離線快取保底，沿用前次有效訊號")
+            tw = old_data_map['IR0001'].copy()
             tw['fallback_used'] = True
             tw['data_status'] = 'fallback_stale'
             if not tw['explanation'].startswith(FALLBACK_PREFIX):
@@ -1387,7 +1485,7 @@ def health():
 
     data = _cache.get('data') or []
     tickers = {item.get('ticker') for item in data if isinstance(item, dict)}
-    has_both = ('QQQ' in tickers) and ('006208.TW' in tickers)
+    has_both = ('QQQ' in tickers) and (TW_TICKER in tickers or '006208.TW' in tickers)
     any_fallback = any(item.get('fallback_used', False) for item in data if isinstance(item, dict))
     any_stale = any(item.get('is_stale', False) or item.get('data_status') in ('stale', 'fallback_stale') for item in data if isinstance(item, dict))
 
@@ -1398,7 +1496,7 @@ def health():
         d_str = item.get('date')
         try:
             bar_d = datetime.strptime(str(d_str), '%Y-%m-%d').date()
-            exp_d = _live_expected_session(tkr.endswith('.TW'))
+            exp_d = _live_expected_session(is_tw_market_ticker(tkr))
             if bar_d < exp_d:
                 any_stale = True
         except Exception:
