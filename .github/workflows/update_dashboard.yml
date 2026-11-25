@@ -43,11 +43,8 @@ jobs:
           gh workflow enable "Monthly Regime Health Check" --repo "${{ github.repository }}" || true
           echo "Keepalive executed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  build-and-deploy:
+  build:
     if: github.event.schedule != '0 0 1 * *'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: 檢出程式碼
@@ -77,14 +74,6 @@ jobs:
           node tests/test_event_ui.js
           node tests/test_strategy_state_ui.js
 
-      - name: 還原前次已送達之推播事件去重狀態 (S03 跨 Run 去重狀態持久化)
-        uses: actions/cache/restore@v4
-        with:
-          path: dist/.last_notified_event.json
-          key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            tg-notify-dedup-
-
       - name: 執行量化運算並產出靜態網站構件 (F03 雙市場完整性門檻 + F11 部署前不提前推播)
         env:
           FUTU_API_KEY: ${{ secrets.FUTU_API_KEY }}
@@ -101,24 +90,66 @@ jobs:
         with:
           path: './dist'
 
-      - name: 等待 GitHub Pages 構件索引完成 (防範偶發 eventual-consistency 404)
+      - name: 上傳推播資料構件 (供 deploy Job 部署成功後讀取)
+        uses: actions/upload-artifact@v7
+        with:
+          name: notify-payload
+          path: |
+            dist/api_data.json
+            dist/api_rollover.json
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: 建置或測試失敗時發送 Telegram 故障警報 (6b)
+        if: failure()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          for i in $(seq 1 12); do
-            COUNT=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=github-pages" --jq '.total_count' 2>/dev/null || echo 0)
-            if [ "${COUNT:-0}" -ge 1 ]; then
-              echo "github-pages artifact indexed (attempt $i, total_count=$COUNT)"
-              exit 0
-            fi
-            echo "Waiting for github-pages artifact index (attempt $i/12)..."
-            sleep 3
-          done
-          echo "Warning: artifact index check timed out after 36s, proceeding to deploy-pages"
+          if [ -f regime_health_check.py ]; then
+            python3 regime_health_check.py --notify-ci-failure
+          fi
+
+  deploy:
+    needs: build
+    if: github.event.schedule != '0 0 1 * *'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 檢出程式碼 (供部署後推播與故障警報腳本使用)
+        uses: actions/checkout@v4
 
       - name: 部署至 GitHub Pages
         id: deployment
+        continue-on-error: true
         uses: actions/deploy-pages@v5
+
+      - name: GitHub Pages 偶發構件索引延遲等待 (15秒後重試)
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 15
+
+      - name: 重新部署至 GitHub Pages (重試)
+        id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+
+      - name: 下載推播資料構件
+        if: success()
+        uses: actions/download-artifact@v8
+        with:
+          name: notify-payload
+          path: './dist'
+
+      - name: 還原前次已送達之推播事件去重狀態 (S03 跨 Run 去重狀態持久化)
+        if: success()
+        uses: actions/cache/restore@v4
+        with:
+          path: dist/.last_notified_event.json
+          key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            tg-notify-dedup-
 
       - name: 部署成功後發送 Telegram 戰情推播 (F11/F17 部署後推播 + 重試狀態檢查)
         if: success()
@@ -126,7 +157,7 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          python build_static.py --notify-only
+          python3 build_static.py --notify-only
 
       - name: 保存已送達之推播事件去重狀態 (S03 跨 Run 去重狀態持久化)
         if: success()
@@ -135,7 +166,7 @@ jobs:
           path: dist/.last_notified_event.json
           key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: 建置或測試失敗時發送 Telegram 故障警報 (6b)
+      - name: 部署或推播失敗時發送 Telegram 故障警報 (6b)
         if: failure()
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}

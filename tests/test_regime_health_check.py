@@ -437,6 +437,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('Monthly Regime Health Check', daily_txt)
         self.assertIn('if: failure()', daily_txt)
         self.assertIn('regime_health_check.py --notify-ci-failure', daily_txt)
+        self.assertIn('\n  build:\n', daily_txt)
+        self.assertIn('\n  deploy:\n    needs: build\n', daily_txt)
+        self.assertIn("steps.deployment.outcome == 'failure'", daily_txt)
 
 
 if __name__ == '__main__':
