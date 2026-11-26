@@ -48,10 +48,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 檢出程式碼
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 設定 Python 環境
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -65,7 +65,7 @@ jobs:
         run: python -B -m unittest discover -s tests -p "test_*.py"
 
       - name: 設定 Node 測試環境
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -115,24 +115,34 @@ jobs:
     if: github.event.schedule != '0 0 1 * *'
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry_1.outputs.page_url || steps.deployment_retry_2.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: 檢出程式碼 (供部署後推播與故障警報腳本使用)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 部署至 GitHub Pages
         id: deployment
         continue-on-error: true
         uses: actions/deploy-pages@v5
 
-      - name: GitHub Pages 偶發構件索引延遲等待 (15秒後重試)
+      - name: GitHub Pages 偶發延遲／5xx 等待 (15秒後第1次重試)
         if: steps.deployment.outcome == 'failure'
         run: sleep 15
 
-      - name: 重新部署至 GitHub Pages (重試)
-        id: deployment_retry
+      - name: 重新部署至 GitHub Pages (第1次重試)
+        id: deployment_retry_1
         if: steps.deployment.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: GitHub Pages 持續異常等待 (45秒後第2次重試)
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry_1.outcome == 'failure'
+        run: sleep 45
+
+      - name: 重新部署至 GitHub Pages (第2次重試)
+        id: deployment_retry_2
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry_1.outcome == 'failure'
         uses: actions/deploy-pages@v5
 
       - name: 下載推播資料構件
@@ -144,7 +154,7 @@ jobs:
 
       - name: 還原前次已送達之推播事件去重狀態 (S03 跨 Run 去重狀態持久化)
         if: success()
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: dist/.last_notified_event.json
           key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}
@@ -161,7 +171,7 @@ jobs:
 
       - name: 保存已送達之推播事件去重狀態 (S03 跨 Run 去重狀態持久化)
         if: success()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: dist/.last_notified_event.json
           key: tg-notify-dedup-${{ github.run_id }}-${{ github.run_attempt }}

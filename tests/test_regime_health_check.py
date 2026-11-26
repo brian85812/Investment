@@ -440,6 +440,17 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('\n  build:\n', daily_txt)
         self.assertIn('\n  deploy:\n    needs: build\n', daily_txt)
         self.assertIn("steps.deployment.outcome == 'failure'", daily_txt)
+        self.assertIn("steps.deployment_retry_1.outcome == 'failure'", daily_txt)
+        self.assertIn('sleep 45', daily_txt)
+        self.assertIn('deployment_retry_2', daily_txt)
+        for legacy in (
+            'actions/checkout@v4',
+            'actions/setup-python@v5',
+            'actions/setup-node@v4',
+            'actions/cache/restore@v4',
+            'actions/cache/save@v4',
+        ):
+            self.assertNotIn(legacy, daily_txt)
 
 
 if __name__ == '__main__':
